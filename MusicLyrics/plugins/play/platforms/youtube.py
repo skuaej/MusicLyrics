@@ -965,13 +965,16 @@ async def _innertube_player(video_id: str) -> Optional[dict]:
 
 
 def _best_innertube_audio(data: dict) -> Optional[str]:
-    """Extract best direct audio URL from Innertube player response."""
-    # NOTE: HLS manifest URLs (.m3u8) are SKIPPED — py-tgcalls cannot
-    # stream them properly (results in silent VC).  Only direct media
-    # URLs (mp4/webm/opus) work with MediaStream.
+    """Extract best direct audio URL from Innertube player response.
+
+    Priority: direct adaptive audio → direct combined formats → HLS manifest.
+    HLS is last resort — direct URLs give better quality and lower latency,
+    but HLS still works via ffmpeg when direct URLs are unavailable (common
+    on cloud IPs where only mobile/TV Innertube clients return results).
+    """
     sd = data.get("streamingData", {})
 
-    # Adaptive audio-only formats
+    # 1. Adaptive audio-only formats (best quality)
     adaptive = sd.get("adaptiveFormats", [])
     audio = [f for f in adaptive
              if f.get("url") and not f.get("signatureCipher")
@@ -983,24 +986,32 @@ def _best_innertube_audio(data: dict) -> Optional[str]:
         best = max(pool, key=lambda f: int(f.get("bitrate", 0)))
         return best.get("url")
 
-    # Fallback: combined formats (audio+video)
+    # 2. Combined formats (audio+video muxed)
     combined = sd.get("formats", [])
     direct = [f for f in combined
               if f.get("url") and not f.get("signatureCipher")]
     if direct:
         return direct[0].get("url")
 
+    # 3. HLS manifest as last resort (ffmpeg can handle .m3u8)
+    hls_url = data.get("_hls_manifest_url")
+    if hls_url:
+        LOG.info("Using HLS manifest URL as last resort for audio")
+        return hls_url
+
     return None
 
 
 def _best_innertube_video(data: dict) -> Optional[str]:
-    """Extract best direct video URL from Innertube player response."""
-    # NOTE: HLS manifest URLs (.m3u8) are SKIPPED — py-tgcalls cannot
-    # stream them properly (results in silent VC).  Only direct media
-    # URLs (mp4/webm) work with MediaStream.
+    """Extract best direct video URL from Innertube player response.
+
+    Priority: direct combined → direct adaptive video → HLS manifest.
+    HLS is last resort but still works via ffmpeg when direct URLs are
+    unavailable (common on cloud IPs).
+    """
     sd = data.get("streamingData", {})
 
-    # Combined formats first (has audio+video — best for VC streaming)
+    # 1. Combined formats first (has audio+video — best for VC streaming)
     combined = sd.get("formats", [])
     direct = [f for f in combined
               if f.get("url") and not f.get("signatureCipher")]
@@ -1023,7 +1034,13 @@ def _best_innertube_video(data: dict) -> Optional[str]:
         best = max(candidates, key=lambda f: f.get("height", 0) or 0)
         return best.get("url")
 
-    # Last resort: audio
+    # 3. HLS manifest as last resort (ffmpeg can handle .m3u8)
+    hls_url = data.get("_hls_manifest_url")
+    if hls_url:
+        LOG.info("Using HLS manifest URL as last resort for video")
+        return hls_url
+
+    # 4. Audio-only fallback
     return _best_innertube_audio(data)
 
 
