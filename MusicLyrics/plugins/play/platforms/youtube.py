@@ -966,12 +966,9 @@ async def _innertube_player(video_id: str) -> Optional[dict]:
 
 def _best_innertube_audio(data: dict) -> Optional[str]:
     """Extract best direct audio URL from Innertube player response."""
-    # Check for HLS manifest first (works without signature decryption)
-    hls_url = data.get("_hls_manifest_url")
-    if hls_url:
-        LOG.info("Using HLS manifest URL for audio")
-        return hls_url
-
+    # NOTE: HLS manifest URLs (.m3u8) are SKIPPED — py-tgcalls cannot
+    # stream them properly (results in silent VC).  Only direct media
+    # URLs (mp4/webm/opus) work with MediaStream.
     sd = data.get("streamingData", {})
 
     # Adaptive audio-only formats
@@ -998,12 +995,9 @@ def _best_innertube_audio(data: dict) -> Optional[str]:
 
 def _best_innertube_video(data: dict) -> Optional[str]:
     """Extract best direct video URL from Innertube player response."""
-    # Check for HLS manifest first (works without signature decryption)
-    hls_url = data.get("_hls_manifest_url")
-    if hls_url:
-        LOG.info("Using HLS manifest URL for video")
-        return hls_url
-
+    # NOTE: HLS manifest URLs (.m3u8) are SKIPPED — py-tgcalls cannot
+    # stream them properly (results in silent VC).  Only direct media
+    # URLs (mp4/webm) work with MediaStream.
     sd = data.get("streamingData", {})
 
     # Combined formats first (has audio+video — best for VC streaming)

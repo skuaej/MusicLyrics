@@ -1497,29 +1497,32 @@ if pytgcalls is not None:
             LOG.debug("Method 4 (raw on_update) failed: %s", e)
 
     if not _registered:
-        LOG.warning("Could not register stream-end callback -- enabling timer-based fallback.")
+        LOG.warning("Could not register stream-end callback -- timer fallback will handle it.")
 
-        # FALLBACK: Timer-based stream-end detection
-        # Polls active chats and checks if track duration has elapsed
-        async def _fallback_stream_end_checker():
-            """Periodically check if tracks have finished playing when callback isn't available."""
-            while True:
-                await asyncio.sleep(5)  # Check every 5 seconds
-                try:
-                    for chat_id in list(_active_chats):
-                        if chat_id not in _play_start_times or chat_id not in _play_durations:
-                            continue
-                        elapsed = time.time() - _play_start_times[chat_id]
-                        duration = _play_durations[chat_id]
-                        # If track has been playing for longer than its duration + 5s buffer
-                        if duration > 0 and elapsed > duration + 5:
-                            LOG.info("Fallback timer detected stream end for %s (elapsed=%.0f, duration=%d)",
-                                     chat_id, elapsed, duration)
-                            await _on_stream_end(None, chat_id)
-                except Exception as e:
-                    LOG.debug("Fallback stream-end checker error: %s", e)
+    # ALWAYS enable timer-based stream-end detection as a safety net.
+    # Even when the callback IS registered, it may never fire if the
+    # stream URL is broken (e.g. HLS manifest, expired CDN URL) — in
+    # that case the bot stays in VC forever.  This timer catches those
+    # cases and triggers auto-next or leave after duration + buffer.
+    async def _fallback_stream_end_checker():
+        """Periodically check if tracks have finished playing."""
+        while True:
+            await asyncio.sleep(5)  # Check every 5 seconds
+            try:
+                for chat_id in list(_active_chats):
+                    if chat_id not in _play_start_times or chat_id not in _play_durations:
+                        continue
+                    elapsed = time.time() - _play_start_times[chat_id]
+                    duration = _play_durations[chat_id]
+                    # If track has been playing for longer than its duration + 10s buffer
+                    if duration > 0 and elapsed > duration + 10:
+                        LOG.info("Fallback timer detected stream end for %s (elapsed=%.0f, duration=%d)",
+                                 chat_id, elapsed, duration)
+                        await _on_stream_end(None, chat_id)
+            except Exception as e:
+                LOG.debug("Fallback stream-end checker error: %s", e)
 
-        asyncio.get_event_loop().create_task(_fallback_stream_end_checker())
+    asyncio.get_event_loop().create_task(_fallback_stream_end_checker())
 
     # ── ALSO register on_kicked / on_left to clean up ──
     try:
