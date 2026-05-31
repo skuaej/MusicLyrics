@@ -1440,16 +1440,41 @@ async def _on_stream_end(client, update):
 if pytgcalls is not None:
     _registered = False
 
-    # Method 1: pytgcalls.on_update with filters (py-tgcalls >= 2.1)
+    # Wrapper that handles both 1-arg and 2-arg callback signatures
+    # and swallows TypeError from py-tgcalls internal issues
+    async def _safe_stream_end_1arg(update):
+        """1-arg handler for newer py-tgcalls versions."""
+        try:
+            await _on_stream_end(None, update)
+        except Exception as e:
+            LOG.exception("Error in _safe_stream_end_1arg: %s", e)
+
+    async def _safe_stream_end_2arg(client, update):
+        """2-arg handler for older py-tgcalls versions."""
+        try:
+            await _on_stream_end(client, update)
+        except Exception as e:
+            LOG.exception("Error in _safe_stream_end_2arg: %s", e)
+
+    # Method 1: pytgcalls.on_update with filters.stream_end (py-tgcalls >= 2.1)
     if not _registered:
         try:
             from pytgcalls import filters as _ptg_filters
             if hasattr(_ptg_filters, "stream_end"):
-                @pytgcalls.on_update(_ptg_filters.stream_end)
-                async def _stream_end_handler(client, update):
-                    await _on_stream_end(client, update)
-                _registered = True
-                LOG.info("Stream-end callback registered via pytgcalls.filters.stream_end")
+                # Try 1-arg signature first (newer py-tgcalls)
+                try:
+                    @pytgcalls.on_update(_ptg_filters.stream_end)
+                    async def _stream_end_handler_1(update):
+                        await _safe_stream_end_1arg(update)
+                    _registered = True
+                    LOG.info("Stream-end callback registered via filters.stream_end (1-arg)")
+                except TypeError:
+                    # Try 2-arg signature
+                    @pytgcalls.on_update(_ptg_filters.stream_end)
+                    async def _stream_end_handler_2(client, update):
+                        await _safe_stream_end_2arg(client, update)
+                    _registered = True
+                    LOG.info("Stream-end callback registered via filters.stream_end (2-arg)")
         except (ImportError, AttributeError, TypeError) as e:
             LOG.debug("Method 1 (filters.stream_end) failed: %s", e)
 
@@ -1457,11 +1482,18 @@ if pytgcalls is not None:
     if not _registered:
         try:
             if hasattr(pytgcalls, "on_stream_end"):
-                @pytgcalls.on_stream_end()
-                async def _stream_end_handler2(client, update):
-                    await _on_stream_end(client, update)
-                _registered = True
-                LOG.info("Stream-end callback registered via pytgcalls.on_stream_end()")
+                try:
+                    @pytgcalls.on_stream_end()
+                    async def _stream_end_handler3(update):
+                        await _safe_stream_end_1arg(update)
+                    _registered = True
+                    LOG.info("Stream-end callback registered via on_stream_end() (1-arg)")
+                except TypeError:
+                    @pytgcalls.on_stream_end()
+                    async def _stream_end_handler4(client, update):
+                        await _safe_stream_end_2arg(client, update)
+                    _registered = True
+                    LOG.info("Stream-end callback registered via on_stream_end() (2-arg)")
         except (AttributeError, TypeError) as e:
             LOG.debug("Method 2 (on_stream_end) failed: %s", e)
 
@@ -1469,11 +1501,17 @@ if pytgcalls is not None:
     if not _registered:
         try:
             if hasattr(pytgcalls, "on_closed_voice_chat"):
-                @pytgcalls.on_closed_voice_chat()
-                async def _stream_end_handler3(client, update):
-                    await _on_stream_end(client, update)
-                _registered = True
-                LOG.info("Stream-end callback registered via pytgcalls.on_closed_voice_chat()")
+                try:
+                    @pytgcalls.on_closed_voice_chat()
+                    async def _stream_end_handler5(update):
+                        await _safe_stream_end_1arg(update)
+                    _registered = True
+                except TypeError:
+                    @pytgcalls.on_closed_voice_chat()
+                    async def _stream_end_handler6(client, update):
+                        await _safe_stream_end_2arg(client, update)
+                    _registered = True
+                LOG.info("Stream-end callback registered via on_closed_voice_chat()")
         except (AttributeError, TypeError) as e:
             LOG.debug("Method 3 (on_closed_voice_chat) failed: %s", e)
 
@@ -1481,14 +1519,18 @@ if pytgcalls is not None:
     if not _registered:
         try:
             @pytgcalls.on_update()
-            async def _raw_update_handler(client, update):
-                # Only handle stream-end type events
+            async def _raw_update_handler(client_or_update, update_or_none=None):
+                # Handle both 1-arg and 2-arg signatures
+                if update_or_none is not None:
+                    update = update_or_none
+                else:
+                    update = client_or_update
                 try:
                     update_type = type(update).__name__.lower()
                     if update_type in ("streamaudioended", "streamvideoended", "streamended", "stream_end"):
-                        await _on_stream_end(client, update)
+                        await _on_stream_end(None, update)
                     elif "end" in update_type and ("stream" in update_type or "audio" in update_type):
-                        await _on_stream_end(client, update)
+                        await _on_stream_end(None, update)
                 except Exception as e:
                     LOG.exception("Error in raw_update_handler: %s", e)
             _registered = True

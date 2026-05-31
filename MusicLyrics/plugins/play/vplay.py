@@ -82,30 +82,34 @@ async def _get_video_media(url: str) -> tuple[str, bool]:
     """Get media path for video playback.
 
     Returns (media_path, is_stream_url).
-    SPEED OPTIMISED: Stream URL first (instant playback, no download wait),
-    download + SoundCloud run concurrently as fallback.
+    PRIORITY: yt-dlp download FIRST (most reliable on cloud servers),
+    then stream URL + SoundCloud concurrently as fallback.
     """
-    # Try 1: Get direct stream URL FIRST (fastest — instant playback)
-    LOG.info("Getting video stream URL for: %s", url)
+    # Try 1: Download the video FIRST (most reliable on cloud servers)
+    LOG.info("Trying yt-dlp video download first for: %s", url)
+    try:
+        filepath = await download_video(url)
+        if filepath and os.path.isfile(filepath):
+            LOG.info("yt-dlp video download succeeded for: %s", url)
+            return filepath, False
+    except Exception as e:
+        LOG.debug("yt-dlp video download failed for %s: %s", url, e)
+
+    # Try 2: Stream URL (Piped/Invidious/Innertube)
+    LOG.info("Download failed, trying video stream URL for: %s", url)
     stream_url = await get_video_stream_url(url)
     if stream_url:
         LOG.info("Using video stream URL for: %s", url)
         return stream_url, True
 
-    # Try 2: Download + SoundCloud CONCURRENTLY
-    LOG.info("Video stream URL failed, trying download + SoundCloud concurrently for: %s", url)
+    # Try 3: Title-based search+download + SoundCloud CONCURRENTLY
+    LOG.info("Stream URL failed, trying search+download + SoundCloud concurrently for: %s", url)
 
     from MusicLyrics.plugins.play.platforms.youtube import get_video_info
     info = await get_video_info(url)
     title = info.get("title", "") if info else ""
 
     async def _try_download():
-        try:
-            filepath = await download_video(url)
-            if filepath and os.path.isfile(filepath):
-                return filepath, False
-        except Exception:
-            pass
         if title and title not in ("YouTube Video", "Unknown"):
             try:
                 filepath_sd, _ = await search_and_download_video(title)
@@ -319,50 +323,91 @@ async def _resolve_video(query: str, platform: str):
             raise ValueError("URL থেকে video পাওয়া যায়নি।")
         return info, media_path, is_stream
 
-    # Plain text query — Priority: JioSaavn → YouTube → SoundCloud
-    # 1. JioSaavn (direct CDN, works reliably for Indian music)
-    LOG.info("Video query: trying JioSaavn first for: %s", query)
+    # Plain text query — Priority: yt-dlp search+download FIRST,
+    # then YouTube stream + JioSaavn + SoundCloud ALL CONCURRENTLY.
+    import asyncio as _aio
+
+    # ── Step 1: yt-dlp search+download (highest priority) ──
+    LOG.info("Video query: trying yt-dlp search+download FIRST for: %s", query)
     try:
-        js_path, js_info = await search_and_download_jiosaavn(query)
-        if js_path and js_info:
-            import os as _os
-            if _os.path.isfile(js_path):
-                LOG.info("JioSaavn found for video query (audio only): %s", js_info.get("title"))
-                info = {
-                    "title": js_info.get("title", "Unknown"),
-                    "url": js_info.get("url", ""),
-                    "duration": js_info.get("duration", 0),
-                    "thumbnail": js_info.get("thumbnail", ""),
-                    "channel": js_info.get("artist", ""),
-                    "platform": "jiosaavn",
-                }
-                return info, js_path, False
-    except Exception:
-        LOG.debug("JioSaavn search failed for video query: %s", query)
+        filepath, dl_info = await search_and_download_video(query)
+        if filepath and dl_info:
+            if dl_info.get("duration", 0) > Config.DURATION_LIMIT_MIN * 60 and dl_info["duration"] > 0:
+                raise ValueError(
+                    f"ভিডিওটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি।"
+                )
+            return dl_info, filepath, False
+    except ValueError:
+        raise
+    except Exception as e:
+        LOG.info("yt-dlp video search+download failed for '%s': %s", query, e)
 
-    # 2. YouTube search + video stream/download
-    yt = await search_youtube(query)
-    if yt:
-        if yt["duration"] > Config.DURATION_LIMIT_MIN * 60 and yt["duration"] > 0:
-            raise ValueError(
-                f"ভিডিওটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি।"
-            )
-        media_path, is_stream = await _get_video_media(yt["url"])
-        if media_path:
-            return yt, media_path, is_stream
+    # ── Step 2: ALL other platforms CONCURRENTLY ──
+    LOG.info("Video query: trying YouTube stream + JioSaavn + SoundCloud CONCURRENTLY for: %s", query)
 
-    # 3. YouTube yt-dlp combined search+download
-    LOG.info("Video search failed, trying combined search+download for: %s", query)
-    filepath, dl_info = await search_and_download_video(query)
-    if filepath and dl_info:
-        return dl_info, filepath, False
+    async def _yt_video_stream():
+        try:
+            yt = await search_youtube(query)
+            if not yt:
+                return None
+            if yt["duration"] > Config.DURATION_LIMIT_MIN * 60 and yt["duration"] > 0:
+                return None
+            media_path, is_stream = await _get_video_media(yt["url"])
+            if media_path:
+                return yt, media_path, is_stream
+        except Exception:
+            pass
+        return None
 
-    # 4. SoundCloud LAST RESORT
-    LOG.info("All YouTube video methods failed, trying SoundCloud for: %s", query)
-    sc_path, sc_info = await search_and_download_soundcloud(query)
-    if sc_path and sc_info:
-        is_stream = bool(sc_info.get("_is_stream_url"))
-        return sc_info, sc_path, is_stream
+    async def _jiosaavn_video():
+        try:
+            js_path, js_info = await search_and_download_jiosaavn(query)
+            if js_path and js_info:
+                import os as _os
+                if _os.path.isfile(js_path):
+                    info = {
+                        "title": js_info.get("title", "Unknown"),
+                        "url": js_info.get("url", ""),
+                        "duration": js_info.get("duration", 0),
+                        "thumbnail": js_info.get("thumbnail", ""),
+                        "channel": js_info.get("artist", ""),
+                        "platform": "jiosaavn",
+                    }
+                    return info, js_path, False
+        except Exception:
+            pass
+        return None
+
+    async def _soundcloud_video():
+        try:
+            sc_path, sc_info = await search_and_download_soundcloud(query)
+            if sc_path and sc_info:
+                is_stream = bool(sc_info.get("_is_stream_url"))
+                if is_stream or os.path.isfile(str(sc_path)):
+                    return sc_info, sc_path, is_stream
+        except Exception:
+            pass
+        return None
+
+    stream_tasks = [
+        _aio.create_task(_yt_video_stream()),
+        _aio.create_task(_jiosaavn_video()),
+        _aio.create_task(_soundcloud_video()),
+    ]
+
+    pending = set(stream_tasks)
+    while pending:
+        done, pending = await _aio.wait(pending, return_when=_aio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                result = task.result()
+                if result:
+                    for p in pending:
+                        p.cancel()
+                    return result
+            except Exception:
+                pass
+
     raise ValueError("কোনো result পাওয়া যায়নি।")
 
 
