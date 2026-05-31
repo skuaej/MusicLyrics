@@ -1131,6 +1131,10 @@ _CLIENT_COMBOS_WITH_COOKIES: list[list[str]] = [
     ["mediaconnect"],                  # MediaConnect — newer, less blocked
     ["tv"],                            # Smart TV — fewer restrictions
     ["android_testsuite"],             # Android Testsuite — direct URLs
+    ["web", "ios"],                    # Web+iOS combo — double coverage
+    ["web_music", "android_vr"],       # Music+VR combo — alternate fallback
+    ["mweb"],                          # Mobile web — fallback with cookies
+    ["tv_embedded"],                   # TV embedded player — last resort
 ]
 
 _CLIENT_COMBOS_NO_COOKIES: list[list[str]] = [
@@ -1143,6 +1147,9 @@ _CLIENT_COMBOS_NO_COOKIES: list[list[str]] = [
     ["tv_embedded"],                   # TV embedded player
     ["web_music"],                     # YouTube Music web client
     ["web_creator"],                   # Creator Studio — works without cookies too
+    ["ios", "android_vr"],             # iOS+VR combo — double coverage
+    ["android_testsuite", "tv"],       # Testsuite+TV combo — alternate fallback
+    ["mweb", "mediaconnect"],          # Mobile+MediaConnect — final combos
 ]
 
 
@@ -1163,9 +1170,9 @@ def _base_ytdlp_opts(client_combo: Optional[list[str]] = None) -> dict:
         "geo_bypass": True,
         "geo_bypass_country": "US",
         "nocheckcertificate": True,
-        "socket_timeout": 10,
-        "retries": 3,
-        "fragment_retries": 3,
+        "socket_timeout": 12,
+        "retries": 5,
+        "fragment_retries": 5,
         "noplaylist": True,
         "no_color": True,
         "noprogress": True,
@@ -1202,7 +1209,7 @@ def _base_ytdlp_opts(client_combo: Optional[list[str]] = None) -> dict:
             "Accept-Language": "en-US,en;q=0.9",
         },
         # Workaround: skip signature decryption issues
-        "extractor_retries": 5,
+        "extractor_retries": 8,
         # IMPORTANT: Don't check certificates on stream URLs
         # (some Piped/Invidious proxies have self-signed certs)
         "nocheckcertificate": True,
@@ -1858,7 +1865,7 @@ def _get_stream_url_sync(url: str, audio_only: bool) -> Optional[str]:
     if _proxy_dead:
         LOG.info("Proxy is dead — skipping proxy attempts, going direct for: %s", url)
         combos = _get_client_combos()
-        for combo in combos[:5]:  # Try first 5 combos (speed)
+        for combo in combos[:7]:  # Try first 7 combos (expanded)
             opts = {**_base_ytdlp_opts(client_combo=combo), "format": fmt}
             opts.pop("proxy", None)  # Force no proxy
             try:
@@ -1874,8 +1881,8 @@ def _get_stream_url_sync(url: str, audio_only: bool) -> Optional[str]:
         return None
 
     last_err = None
-    # Try first 5 client combos for faster failure detection
-    for combo in _get_client_combos()[:5]:
+    # Try first 7 client combos for faster failure detection
+    for combo in _get_client_combos()[:7]:
         opts = {**_base_ytdlp_opts(client_combo=combo), "format": fmt}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -2134,11 +2141,15 @@ async def search_and_download_audio(query: str) -> tuple[Optional[str], Optional
     except Exception:
         pass
 
-    # Try first 2 client combos for search+download
-    for combo in _get_client_combos()[:2]:
+    # Try first 4 client combos for search+download (expanded for reliability)
+    # Alternate between two format strings for wider coverage
+    _AUDIO_FORMATS = ["ba/b", "ba[ext=m4a]/ba/b", "ba[ext=webm]/ba/b", "b"]
+    combos = _get_client_combos()[:4]
+    for idx, combo in enumerate(combos):
+        fmt = _AUDIO_FORMATS[idx % len(_AUDIO_FORMATS)]
         opts = {
             **_base_ytdlp_opts(client_combo=combo),
-            "format": "ba/b",
+            "format": fmt,
             "outtmpl": os.path.join(_DOWNLOADS, "%(id)s.%(ext)s"),
             "noplaylist": True,
             "overwrites": False,
@@ -2154,9 +2165,9 @@ async def search_and_download_audio(query: str) -> tuple[Optional[str], Optional
 
         dl_query = best_url or query
         try:
-            def _do_search_dl():
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(dl_query, download=True)
+            def _do_search_dl(_opts=opts, _query=dl_query):
+                with yt_dlp.YoutubeDL(_opts) as ydl:
+                    info = ydl.extract_info(_query, download=True)
                     if not info:
                         return None, None
                     # ytsearch returns a playlist-like result
@@ -2191,77 +2202,80 @@ async def search_and_download_audio(query: str) -> tuple[Optional[str], Optional
 
             filepath, info = await loop.run_in_executor(None, _do_search_dl)
             if filepath and os.path.isfile(filepath):
-                LOG.info("search_and_download_audio succeeded (client: %s): %s", combo, query)
+                LOG.info("search_and_download_audio succeeded (client: %s, fmt: %s): %s", combo, fmt, query)
                 return filepath, info
         except Exception as exc:
-            LOG.warning("search_and_download_audio failed (client %s): %s", combo, exc)
+            LOG.warning("search_and_download_audio failed (client %s, fmt %s): %s", combo, fmt, exc)
             continue
 
-    LOG.error("search_and_download_audio: all attempts failed for: %s", query)
+    LOG.error("search_and_download_audio: all %d combo attempts failed for: %s", len(combos), query)
 
-    # Last resort: retry first client combo without proxy
+    # Last resort: retry first 2 client combos without proxy, alternate formats
     if _get_proxy() or _proxy_dead:
         LOG.info("search_and_download_audio: retrying WITHOUT proxy for: %s", query)
         import yt_dlp as _yt_dlp
-        combos = _get_client_combos()
-        opts = {
-            **_base_ytdlp_opts(client_combo=combos[0]),
-            "format": "ba/b",
-            "outtmpl": os.path.join(_DOWNLOADS, "%(id)s.%(ext)s"),
-            "noplaylist": True,
-            "overwrites": False,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "opus",
-                "preferredquality": "128",
-            }],
-        }
-        # Use pre-selected URL if available, otherwise ytsearch
-        noproxy_query = best_url or query
-        if not best_url:
-            opts["default_search"] = "ytsearch"
-        opts.pop("proxy", None)  # Force no proxy
-        try:
-            def _do_noproxy_dl():
-                with _yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(noproxy_query, download=True)
-                    if not info:
-                        return None, None
-                    entries = info.get("entries")
-                    item = entries[0] if entries else info
-                    if not item:
-                        return None, None
-                    path = ydl.prepare_filename(item)
-                    if not os.path.exists(path):
-                        base = os.path.splitext(path)[0]
-                        for ext in (".opus", ".m4a", ".webm", ".mp3", ".ogg", ".mp4"):
-                            candidate = base + ext
-                            if os.path.exists(candidate):
-                                path = candidate
-                                break
-                        else:
-                            matches = sorted(glob.glob(f"{base}.*"),
-                                             key=os.path.getmtime, reverse=True)
-                            if matches:
-                                path = matches[0]
-                    if not os.path.exists(path):
-                        return None, None
-                    result_info = {
-                        "title": item.get("title", "Unknown"),
-                        "url": item.get("webpage_url") or item.get("url", ""),
-                        "duration": int(item.get("duration") or 0),
-                        "thumbnail": item.get("thumbnail", ""),
-                        "channel": item.get("uploader") or item.get("channel", "Unknown"),
-                        "video_id": item.get("id", ""),
-                    }
-                    return path, result_info
-            filepath, info = await loop.run_in_executor(None, _do_noproxy_dl)
-            if filepath and os.path.isfile(filepath):
-                LOG.info("search_and_download_audio succeeded WITHOUT proxy: %s", query)
-                _mark_proxy_failed()
-                return filepath, info
-        except Exception as exc:
-            LOG.warning("search_and_download_audio no-proxy also failed: %s", exc)
+        _noproxy_combos = _get_client_combos()[:2]
+        _noproxy_fmts = ["ba/b", "ba[ext=m4a]/ba/b"]
+        for _np_idx, _np_combo in enumerate(_noproxy_combos):
+            _np_fmt = _noproxy_fmts[_np_idx % len(_noproxy_fmts)]
+            opts = {
+                **_base_ytdlp_opts(client_combo=_np_combo),
+                "format": _np_fmt,
+                "outtmpl": os.path.join(_DOWNLOADS, "%(id)s.%(ext)s"),
+                "noplaylist": True,
+                "overwrites": False,
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "opus",
+                    "preferredquality": "128",
+                }],
+            }
+            # Use pre-selected URL if available, otherwise ytsearch
+            noproxy_query = best_url or query
+            if not best_url:
+                opts["default_search"] = "ytsearch"
+            opts.pop("proxy", None)  # Force no proxy
+            try:
+                def _do_noproxy_dl(_opts=opts, _query=noproxy_query):
+                    with _yt_dlp.YoutubeDL(_opts) as ydl:
+                        info = ydl.extract_info(_query, download=True)
+                        if not info:
+                            return None, None
+                        entries = info.get("entries")
+                        item = entries[0] if entries else info
+                        if not item:
+                            return None, None
+                        path = ydl.prepare_filename(item)
+                        if not os.path.exists(path):
+                            base = os.path.splitext(path)[0]
+                            for ext in (".opus", ".m4a", ".webm", ".mp3", ".ogg", ".mp4"):
+                                candidate = base + ext
+                                if os.path.exists(candidate):
+                                    path = candidate
+                                    break
+                            else:
+                                matches = sorted(glob.glob(f"{base}.*"),
+                                                 key=os.path.getmtime, reverse=True)
+                                if matches:
+                                    path = matches[0]
+                        if not os.path.exists(path):
+                            return None, None
+                        result_info = {
+                            "title": item.get("title", "Unknown"),
+                            "url": item.get("webpage_url") or item.get("url", ""),
+                            "duration": int(item.get("duration") or 0),
+                            "thumbnail": item.get("thumbnail", ""),
+                            "channel": item.get("uploader") or item.get("channel", "Unknown"),
+                            "video_id": item.get("id", ""),
+                        }
+                        return path, result_info
+                filepath, info = await loop.run_in_executor(None, _do_noproxy_dl)
+                if filepath and os.path.isfile(filepath):
+                    LOG.info("search_and_download_audio succeeded WITHOUT proxy (client %s): %s", _np_combo, query)
+                    _mark_proxy_failed()
+                    return filepath, info
+            except Exception as exc:
+                LOG.warning("search_and_download_audio no-proxy (client %s) failed: %s", _np_combo, exc)
 
     # Ultimate last resort: try with NO player_client restriction
     # This lets yt-dlp auto-detect the best client for the current IP
@@ -2275,8 +2289,8 @@ async def search_and_download_audio(query: str) -> tuple[Optional[str], Optional
             "geo_bypass_country": "US",
             "nocheckcertificate": True,
             "socket_timeout": 15,
-            "retries": 3,
-            "fragment_retries": 3,
+            "retries": 5,
+            "fragment_retries": 5,
             "noplaylist": True,
             "no_color": True,
             "noprogress": True,
@@ -2361,11 +2375,19 @@ async def search_and_download_video(query: str) -> tuple[Optional[str], Optional
     except Exception:
         pass
 
-    # Try first 2 client combos for video search+download
-    for combo in _get_client_combos()[:2]:
+    # Try first 4 client combos for video search+download (expanded for reliability)
+    _VIDEO_FORMATS = [
+        "bv*[height<=720]+ba/bv+ba/b",
+        "bv[height<=720]+ba/b",
+        "bv*[height<=480]+ba/bv+ba/b",
+        "b",
+    ]
+    combos = _get_client_combos()[:4]
+    for idx, combo in enumerate(combos):
+        fmt = _VIDEO_FORMATS[idx % len(_VIDEO_FORMATS)]
         opts = {
             **_base_ytdlp_opts(client_combo=combo),
-            "format": "bv*[height<=720]+ba/bv+ba/b",
+            "format": fmt,
             "outtmpl": os.path.join(_DOWNLOADS, "%(id)s_video.%(ext)s"),
             "merge_output_format": "mp4",
             "noplaylist": True,
@@ -2381,9 +2403,9 @@ async def search_and_download_video(query: str) -> tuple[Optional[str], Optional
 
         dl_query = best_url or query
         try:
-            def _do_search_dl():
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(dl_query, download=True)
+            def _do_search_dl(_opts=opts, _query=dl_query):
+                with yt_dlp.YoutubeDL(_opts) as ydl:
+                    info = ydl.extract_info(_query, download=True)
                     if not info:
                         return None, None
                     entries = info.get("entries")
@@ -2417,77 +2439,154 @@ async def search_and_download_video(query: str) -> tuple[Optional[str], Optional
 
             filepath, info = await loop.run_in_executor(None, _do_search_dl)
             if filepath and os.path.isfile(filepath):
-                LOG.info("search_and_download_video succeeded (client: %s): %s", combo, query)
+                LOG.info("search_and_download_video succeeded (client: %s, fmt: %s): %s", combo, fmt, query)
                 return filepath, info
         except Exception as exc:
-            LOG.warning("search_and_download_video failed (client %s): %s", combo, exc)
+            LOG.warning("search_and_download_video failed (client %s, fmt %s): %s", combo, fmt, exc)
             continue
 
-    LOG.error("search_and_download_video: all attempts failed for: %s", query)
+    LOG.error("search_and_download_video: all %d combo attempts failed for: %s", len(combos), query)
 
-    # Last resort: retry first client combo without proxy
+    # Last resort: retry first 2 combos without proxy, alternate formats
     if _get_proxy() or _proxy_dead:
         LOG.info("search_and_download_video: retrying WITHOUT proxy for: %s", query)
         import yt_dlp as _yt_dlp
-        combos = _get_client_combos()
-        opts = {
-            **_base_ytdlp_opts(client_combo=combos[0]),
+        _noproxy_combos = _get_client_combos()[:2]
+        _noproxy_vfmts = ["bv*[height<=720]+ba/bv+ba/b", "bv[height<=480]+ba/b"]
+        for _np_idx, _np_combo in enumerate(_noproxy_combos):
+            _np_fmt = _noproxy_vfmts[_np_idx % len(_noproxy_vfmts)]
+            opts = {
+                **_base_ytdlp_opts(client_combo=_np_combo),
+                "format": _np_fmt,
+                "outtmpl": os.path.join(_DOWNLOADS, "%(id)s_video.%(ext)s"),
+                "merge_output_format": "mp4",
+                "noplaylist": True,
+                "overwrites": False,
+                "postprocessors": [{
+                    "key": "FFmpegVideoRemuxer",
+                    "preferedformat": "mp4",
+                }],
+            }
+            # Use pre-selected URL if available, otherwise ytsearch
+            noproxy_query = best_url or query
+            if not best_url:
+                opts["default_search"] = "ytsearch"
+            opts.pop("proxy", None)  # Force no proxy
+            try:
+                def _do_noproxy_dl(_opts=opts, _query=noproxy_query):
+                    with _yt_dlp.YoutubeDL(_opts) as ydl:
+                        info = ydl.extract_info(_query, download=True)
+                        if not info:
+                            return None, None
+                        entries = info.get("entries")
+                        item = entries[0] if entries else info
+                        if not item:
+                            return None, None
+                        path = ydl.prepare_filename(item)
+                        if not os.path.exists(path):
+                            base = os.path.splitext(path)[0]
+                            for ext in (".mp4", ".mkv", ".webm", ".flv"):
+                                candidate = base + ext
+                                if os.path.exists(candidate):
+                                    path = candidate
+                                    break
+                            else:
+                                matches = sorted(glob.glob(f"{base}.*"),
+                                                 key=os.path.getmtime, reverse=True)
+                                if matches:
+                                    path = matches[0]
+                        if not os.path.exists(path):
+                            return None, None
+                        result_info = {
+                            "title": item.get("title", "Unknown"),
+                            "url": item.get("webpage_url") or item.get("url", ""),
+                            "duration": int(item.get("duration") or 0),
+                            "thumbnail": item.get("thumbnail", ""),
+                            "channel": item.get("uploader") or item.get("channel", "Unknown"),
+                            "video_id": item.get("id", ""),
+                        }
+                        return path, result_info
+                filepath, info = await loop.run_in_executor(None, _do_noproxy_dl)
+                if filepath and os.path.isfile(filepath):
+                    LOG.info("search_and_download_video succeeded WITHOUT proxy (client %s): %s", _np_combo, query)
+                    _mark_proxy_failed()
+                    return filepath, info
+            except Exception as exc:
+                LOG.warning("search_and_download_video no-proxy (client %s) failed: %s", _np_combo, exc)
+
+    # Ultimate last resort: try with NO player_client restriction (auto-detect)
+    LOG.info("search_and_download_video: trying with auto client detection for: %s", query)
+    try:
+        import yt_dlp as _yt_dlp2
+        auto_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "geo_bypass": True,
+            "geo_bypass_country": "US",
+            "nocheckcertificate": True,
+            "socket_timeout": 15,
+            "retries": 5,
+            "fragment_retries": 5,
+            "noplaylist": True,
+            "no_color": True,
+            "noprogress": True,
+            "logger": _ytdlp_logger,
+            "check_formats": False,
+            "ignore_no_formats_error": True,
             "format": "bv*[height<=720]+ba/bv+ba/b",
             "outtmpl": os.path.join(_DOWNLOADS, "%(id)s_video.%(ext)s"),
             "merge_output_format": "mp4",
-            "noplaylist": True,
             "overwrites": False,
+            "default_search": "ytsearch",
+            "hls_prefer_native": True,
             "postprocessors": [{
                 "key": "FFmpegVideoRemuxer",
                 "preferedformat": "mp4",
             }],
         }
-        # Use pre-selected URL if available, otherwise ytsearch
-        noproxy_query = best_url or query
-        if not best_url:
-            opts["default_search"] = "ytsearch"
-        opts.pop("proxy", None)  # Force no proxy
-        try:
-            def _do_noproxy_dl():
-                with _yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(noproxy_query, download=True)
-                    if not info:
-                        return None, None
-                    entries = info.get("entries")
-                    item = entries[0] if entries else info
-                    if not item:
-                        return None, None
-                    path = ydl.prepare_filename(item)
-                    if not os.path.exists(path):
-                        base = os.path.splitext(path)[0]
-                        for ext in (".mp4", ".mkv", ".webm", ".flv"):
-                            candidate = base + ext
-                            if os.path.exists(candidate):
-                                path = candidate
-                                break
-                        else:
-                            matches = sorted(glob.glob(f"{base}.*"),
-                                             key=os.path.getmtime, reverse=True)
-                            if matches:
-                                path = matches[0]
-                    if not os.path.exists(path):
-                        return None, None
-                    result_info = {
-                        "title": item.get("title", "Unknown"),
-                        "url": item.get("webpage_url") or item.get("url", ""),
-                        "duration": int(item.get("duration") or 0),
-                        "thumbnail": item.get("thumbnail", ""),
-                        "channel": item.get("uploader") or item.get("channel", "Unknown"),
-                        "video_id": item.get("id", ""),
-                    }
-                    return path, result_info
-            filepath, info = await loop.run_in_executor(None, _do_noproxy_dl)
-            if filepath and os.path.isfile(filepath):
-                LOG.info("search_and_download_video succeeded WITHOUT proxy: %s", query)
-                _mark_proxy_failed()
-                return filepath, info
-        except Exception as exc:
-            LOG.warning("search_and_download_video no-proxy also failed: %s", exc)
+        cookie = _get_cookie()
+        if cookie:
+            auto_opts["cookiefile"] = cookie
+        auto_query = best_url or query
+        def _do_auto_vdl():
+            with _yt_dlp2.YoutubeDL(auto_opts) as ydl:
+                info = ydl.extract_info(auto_query, download=True)
+                if not info:
+                    return None, None
+                entries = info.get("entries")
+                item = entries[0] if entries else info
+                if not item:
+                    return None, None
+                path = ydl.prepare_filename(item)
+                if not os.path.exists(path):
+                    base = os.path.splitext(path)[0]
+                    for ext in (".mp4", ".mkv", ".webm", ".flv"):
+                        candidate = base + ext
+                        if os.path.exists(candidate):
+                            path = candidate
+                            break
+                    else:
+                        matches = sorted(glob.glob(f"{base}.*"),
+                                         key=os.path.getmtime, reverse=True)
+                        if matches:
+                            path = matches[0]
+                if not os.path.exists(path):
+                    return None, None
+                result_info = {
+                    "title": item.get("title", "Unknown"),
+                    "url": item.get("webpage_url") or item.get("url", ""),
+                    "duration": int(item.get("duration") or 0),
+                    "thumbnail": item.get("thumbnail", ""),
+                    "channel": item.get("uploader") or item.get("channel", "Unknown"),
+                    "video_id": item.get("id", ""),
+                }
+                return path, result_info
+        filepath, info = await loop.run_in_executor(None, _do_auto_vdl)
+        if filepath and os.path.isfile(filepath):
+            LOG.info("search_and_download_video succeeded with auto client: %s", query)
+            return filepath, info
+    except Exception as exc:
+        LOG.warning("search_and_download_video auto-client also failed: %s", exc)
 
     return None, None
 
@@ -2585,8 +2684,8 @@ async def _run_ytdlp(url: str, opts: dict) -> Optional[str]:
         LOG.info("Proxy is dead — running yt-dlp without proxy for: %s", url)
 
     last_err = None
-    # Try first 5 client combos for download (expanded from 3 for reliability)
-    for combo in _get_client_combos()[:5]:
+    # Try first 7 client combos for download (expanded for maximum reliability)
+    for combo in _get_client_combos()[:7]:
         run_opts = {**opts}
         # Build extractor_args preserving PO token and visitor data
         yt_args = {"player_client": combo}
