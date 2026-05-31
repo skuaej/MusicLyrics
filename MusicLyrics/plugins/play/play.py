@@ -107,50 +107,56 @@ async def _get_audio_media(url: str) -> tuple[str, bool]:
 
     Returns (media_path, is_stream_url).
     PRIORITY:
-    Step 1: YouTube stream URL + yt-dlp download CONCURRENT (both YouTube)
+    Step 1: yt-dlp download + YouTube stream URL CONCURRENT
+            — prefer downloaded file (reliable) over stream URL (expires)
     Step 2: ONLY if Step 1 fails: title-search + JioSaavn + SoundCloud
     """
     import asyncio as _aio
 
-    # ── Step 1: Stream URL + yt-dlp download CONCURRENT ──
-    LOG.info("Trying YouTube stream URL + yt-dlp download CONCURRENTLY for: %s", url)
+    # ── Step 1: Download + Stream URL CONCURRENT ──
+    # Download is PREFERRED because stream URLs expire quickly on cloud servers
+    LOG.info("Trying yt-dlp download + YouTube stream URL CONCURRENTLY for: %s", url)
 
-    async def _try_stream_url():
-        try:
-            su = await get_audio_stream_url(url)
-            if su:
-                LOG.info("Stream URL obtained for: %s", url)
-                return su, True
-        except Exception:
-            pass
-        return None
+    _download_result = None
+    _stream_result = None
 
     async def _try_ytdlp_direct():
+        nonlocal _download_result
         try:
             fp = await download_audio(url)
             if fp and os.path.isfile(fp):
                 LOG.info("yt-dlp download succeeded for: %s", url)
+                _download_result = (fp, False)
                 return fp, False
         except Exception:
             pass
         return None
 
+    async def _try_stream_url():
+        nonlocal _stream_result
+        try:
+            su = await get_audio_stream_url(url)
+            if su:
+                LOG.info("Stream URL obtained for: %s", url)
+                _stream_result = (su, True)
+                return su, True
+        except Exception:
+            pass
+        return None
+
     yt_tasks = [
-        _aio.create_task(_try_stream_url()),
         _aio.create_task(_try_ytdlp_direct()),
+        _aio.create_task(_try_stream_url()),
     ]
-    yt_pending = set(yt_tasks)
-    while yt_pending:
-        done, yt_pending = await _aio.wait(yt_pending, return_when=_aio.FIRST_COMPLETED)
-        for task in done:
-            try:
-                result = task.result()
-                if result:
-                    for p in yt_pending:
-                        p.cancel()
-                    return result
-            except Exception:
-                pass
+
+    # Wait for ALL tasks (not FIRST_COMPLETED) so we can prefer download
+    await _aio.gather(*yt_tasks, return_exceptions=True)
+
+    # Prefer downloaded file over stream URL (stream URLs expire)
+    if _download_result:
+        return _download_result
+    if _stream_result:
+        return _stream_result
 
     # ── Step 2: YouTube failed — title-search + JioSaavn + SoundCloud ──
     LOG.info("YouTube methods failed, trying title-search + JioSaavn + SoundCloud for: %s", url)

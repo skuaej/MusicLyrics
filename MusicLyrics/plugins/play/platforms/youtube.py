@@ -277,7 +277,7 @@ async def _try_piped_instance(base_url: str, video_id: str) -> Optional[dict]:
             async with session.get(
                 f"{base_url}/streams/{video_id}",
                 headers=_PROXY_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=4),
+                timeout=aiohttp.ClientTimeout(total=6),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -334,7 +334,7 @@ async def _try_invidious_instance(base_url: str, video_id: str) -> Optional[dict
             async with session.get(
                 f"{base_url}/api/v1/videos/{video_id}",
                 headers=_PROXY_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=4),
+                timeout=aiohttp.ClientTimeout(total=6),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -1137,12 +1137,12 @@ _CLIENT_COMBOS_NO_COOKIES: list[list[str]] = [
     ["ios"],                           # iOS — best without cookies
     ["android_vr"],                    # Android VR — less monitored
     ["android_testsuite"],             # Android Testsuite — direct URLs
+    ["mweb"],                          # Mobile web — works well on cloud
     ["mediaconnect"],                  # MediaConnect — newer client
     ["tv"],                            # Smart TV — fewer restrictions
+    ["tv_embedded"],                   # TV embedded player
     ["web_music"],                     # YouTube Music web client
     ["web_creator"],                   # Creator Studio — works without cookies too
-    ["tv_embedded"],                   # TV embedded player
-    ["mweb"],                          # Mobile web fallback
 ]
 
 
@@ -1164,8 +1164,8 @@ def _base_ytdlp_opts(client_combo: Optional[list[str]] = None) -> dict:
         "geo_bypass_country": "US",
         "nocheckcertificate": True,
         "socket_timeout": 10,
-        "retries": 2,
-        "fragment_retries": 2,
+        "retries": 3,
+        "fragment_retries": 3,
         "noplaylist": True,
         "no_color": True,
         "noprogress": True,
@@ -1187,6 +1187,9 @@ def _base_ytdlp_opts(client_combo: Optional[list[str]] = None) -> dict:
         "extractor_args": {
             "youtube": {
                 "player_client": client_combo,
+                # Skip HTML5 player JS download when possible (faster, avoids
+                # signature cipher issues on cloud servers)
+                "player_skip": ["configs"],
             },
         },
         "hls_prefer_native": True,  # Use native HLS downloader (more reliable)
@@ -1199,7 +1202,7 @@ def _base_ytdlp_opts(client_combo: Optional[list[str]] = None) -> dict:
             "Accept-Language": "en-US,en;q=0.9",
         },
         # Workaround: skip signature decryption issues
-        "extractor_retries": 3,
+        "extractor_retries": 5,
         # IMPORTANT: Don't check certificates on stream URLs
         # (some Piped/Invidious proxies have self-signed certs)
         "nocheckcertificate": True,
@@ -1508,11 +1511,78 @@ def _ytdlp_search_sync(query: str, max_results: int = 1) -> Optional[dict]:
 # STREAM URL EXTRACTION — Piped/Invidious first, yt-dlp fallback
 # ══════════════════════════════════════════════════════════════════════════════
 
+
+async def _validate_stream_url(url: str) -> bool:
+    """Validate that a stream URL is actually reachable and returns audio/video.
+
+    This prevents passing dead/expired URLs to py-tgcalls which causes
+    no-sound issues.  Uses a range request (first few bytes) instead of
+    HEAD because some CDNs (YouTube, Piped proxies) reject HEAD requests.
+
+    Returns True if URL is valid and streamable, False otherwise.
+    """
+    if not url or not url.startswith("http"):
+        return False
+    # HLS manifests (.m3u8) are always accepted — ffmpeg handles them
+    if ".m3u8" in url or "manifest/hls" in url:
+        return True
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Use GET with Range header (first 1KB) — more reliable than HEAD
+            headers = {
+                **_PROXY_HEADERS,
+                "Range": "bytes=0-1023",
+            }
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=3, connect=1.5),
+                allow_redirects=True,
+            ) as resp:
+                if resp.status in (200, 206):
+                    # Check content type — must be audio/video, not HTML error page
+                    ct = resp.content_type or ""
+                    if ct.startswith(("audio/", "video/", "application/octet",
+                                      "binary/", "application/ogg")):
+                        return True
+                    # Some CDNs don't set content-type correctly, check size
+                    body = await resp.read()
+                    if len(body) > 100:
+                        # Not an HTML error page
+                        if not body[:50].lstrip().startswith((b"<", b"{")):
+                            return True
+                    LOG.debug("Stream URL returned wrong content-type '%s': %s",
+                             ct, url[:80])
+                    return False
+                elif resp.status in (301, 302, 303, 307, 308):
+                    # Redirect — assume OK, py-tgcalls/ffmpeg will follow
+                    return True
+                elif resp.status == 403:
+                    LOG.warning("Stream URL returned 403 (blocked/expired): %s", url[:80])
+                    return False
+                elif resp.status == 410:
+                    LOG.warning("Stream URL returned 410 (gone/expired): %s", url[:80])
+                    return False
+                else:
+                    LOG.debug("Stream URL returned HTTP %d: %s", resp.status, url[:80])
+                    return False
+    except asyncio.TimeoutError:
+        # On timeout, assume OK — slow CDN, let py-tgcalls try
+        return True
+    except Exception as e:
+        LOG.debug("Stream URL validation error: %s for %s", e, url[:80])
+        # On connection errors, URL is likely dead
+        return False
+
+
 async def get_audio_stream_url(url: str) -> Optional[str]:
     """Extract direct audio stream URL (no download).
 
     SPEED OPTIMISED: Cobalt + Innertube + Piped run CONCURRENTLY.
     First successful result wins — no waiting for sequential failures.
+
+    Stream URLs are validated with a HEAD request before returning to
+    avoid passing expired/dead URLs to py-tgcalls (which causes no-sound).
     """
     video_id = _extract_video_id(url)
 
@@ -1571,11 +1641,15 @@ async def get_audio_stream_url(url: str) -> Optional[str]:
                 try:
                     result = task.result()
                     if result:
-                        # Cancel remaining tasks
-                        for p in pending:
-                            p.cancel()
-                        LOG.info("Audio stream URL obtained (concurrent) for %s", video_id)
-                        return result
+                        # Validate the stream URL before returning
+                        if await _validate_stream_url(result):
+                            # Cancel remaining tasks
+                            for p in pending:
+                                p.cancel()
+                            LOG.info("Audio stream URL obtained and validated (concurrent) for %s", video_id)
+                            return result
+                        else:
+                            LOG.warning("Audio stream URL failed validation, trying next: %s", result[:80])
                 except Exception:
                     pass
 
@@ -1583,9 +1657,13 @@ async def get_audio_stream_url(url: str) -> Optional[str]:
     LOG.info("All direct APIs failed, trying yt-dlp for audio: %s", url)
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(
+        result = await loop.run_in_executor(
             None, _get_stream_url_sync, url, True
         )
+        if result and await _validate_stream_url(result):
+            return result
+        elif result:
+            LOG.warning("yt-dlp stream URL failed validation: %s", result[:80])
     except Exception:
         LOG.exception("Audio stream URL extraction failed: %s", url)
 
@@ -1597,6 +1675,8 @@ async def get_video_stream_url(url: str) -> Optional[str]:
 
     SPEED OPTIMISED: Cobalt + Innertube + Piped run CONCURRENTLY.
     First successful result wins — no waiting for sequential failures.
+
+    Stream URLs are validated with a HEAD request before returning.
     """
     video_id = _extract_video_id(url)
 
@@ -1651,10 +1731,13 @@ async def get_video_stream_url(url: str) -> Optional[str]:
                 try:
                     result = task.result()
                     if result:
-                        for p in pending:
-                            p.cancel()
-                        LOG.info("Video stream URL obtained (concurrent) for %s", video_id)
-                        return result
+                        if await _validate_stream_url(result):
+                            for p in pending:
+                                p.cancel()
+                            LOG.info("Video stream URL obtained and validated (concurrent) for %s", video_id)
+                            return result
+                        else:
+                            LOG.warning("Video stream URL failed validation, trying next: %s", result[:80])
                 except Exception:
                     pass
 
@@ -1662,9 +1745,13 @@ async def get_video_stream_url(url: str) -> Optional[str]:
     LOG.info("All direct APIs failed, trying yt-dlp for video: %s", url)
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(
+        result = await loop.run_in_executor(
             None, _get_stream_url_sync, url, False
         )
+        if result and await _validate_stream_url(result):
+            return result
+        elif result:
+            LOG.warning("yt-dlp video stream URL failed validation: %s", result[:80])
     except Exception:
         LOG.exception("Video stream URL extraction failed: %s", url)
 
@@ -2198,6 +2285,81 @@ async def search_and_download_audio(query: str) -> tuple[Optional[str], Optional
                 return filepath, info
         except Exception as exc:
             LOG.warning("search_and_download_audio no-proxy also failed: %s", exc)
+
+    # Ultimate last resort: try with NO player_client restriction
+    # This lets yt-dlp auto-detect the best client for the current IP
+    LOG.info("search_and_download_audio: trying with auto client detection for: %s", query)
+    try:
+        import yt_dlp as _yt_dlp2
+        auto_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "geo_bypass": True,
+            "geo_bypass_country": "US",
+            "nocheckcertificate": True,
+            "socket_timeout": 15,
+            "retries": 3,
+            "fragment_retries": 3,
+            "noplaylist": True,
+            "no_color": True,
+            "noprogress": True,
+            "logger": _ytdlp_logger,
+            "check_formats": False,
+            "ignore_no_formats_error": True,
+            "format": "ba/b",
+            "outtmpl": os.path.join(_DOWNLOADS, "%(id)s.%(ext)s"),
+            "overwrites": False,
+            "default_search": "ytsearch",
+            "hls_prefer_native": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "opus",
+                "preferredquality": "128",
+            }],
+        }
+        cookie = _get_cookie()
+        if cookie:
+            auto_opts["cookiefile"] = cookie
+        auto_query = best_url or query
+        def _do_auto_dl():
+            with _yt_dlp2.YoutubeDL(auto_opts) as ydl:
+                info = ydl.extract_info(auto_query, download=True)
+                if not info:
+                    return None, None
+                entries = info.get("entries")
+                item = entries[0] if entries else info
+                if not item:
+                    return None, None
+                path = ydl.prepare_filename(item)
+                if not os.path.exists(path):
+                    base = os.path.splitext(path)[0]
+                    for ext in (".opus", ".m4a", ".webm", ".mp3", ".ogg", ".mp4"):
+                        candidate = base + ext
+                        if os.path.exists(candidate):
+                            path = candidate
+                            break
+                    else:
+                        matches = sorted(glob.glob(f"{base}.*"),
+                                         key=os.path.getmtime, reverse=True)
+                        if matches:
+                            path = matches[0]
+                if not os.path.exists(path):
+                    return None, None
+                result_info = {
+                    "title": item.get("title", "Unknown"),
+                    "url": item.get("webpage_url") or item.get("url", ""),
+                    "duration": int(item.get("duration") or 0),
+                    "thumbnail": item.get("thumbnail", ""),
+                    "channel": item.get("uploader") or item.get("channel", "Unknown"),
+                    "video_id": item.get("id", ""),
+                }
+                return path, result_info
+        filepath, info = await loop.run_in_executor(None, _do_auto_dl)
+        if filepath and os.path.isfile(filepath):
+            LOG.info("search_and_download_audio succeeded with auto client: %s", query)
+            return filepath, info
+    except Exception as exc:
+        LOG.warning("search_and_download_audio auto-client also failed: %s", exc)
 
     return None, None
 

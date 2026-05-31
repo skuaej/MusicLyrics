@@ -742,9 +742,9 @@ async def stream_audio(
     if _is_url(media_path):
         url_ok = await _check_stream_url(media_path)
         if not url_ok:
-            LOG.warning("Stream URL pre-check failed in %s — trying fallbacks concurrently", chat_id)
+            LOG.warning("Stream URL pre-check failed in %s — trying download fallbacks concurrently", chat_id)
             if title:
-                # Run all fallbacks CONCURRENTLY for speed
+                # Run all fallbacks CONCURRENTLY — prefer downloads over stream URLs
                 async def _fb_youtube():
                     try:
                         from MusicLyrics.plugins.play.platforms.youtube import search_and_download_audio
@@ -778,25 +778,33 @@ async def stream_audio(
                     asyncio.create_task(_fb_jiosaavn()),
                     asyncio.create_task(_fb_soundcloud()),
                 ]
-                pending = set(tasks)
+                # Wait for ALL tasks, prefer local file results
+                results = await asyncio.gather(*tasks, return_exceptions=True)
                 recovered = False
-                while pending:
-                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
+                for result in results:
+                    if isinstance(result, str) and result and os.path.isfile(result):
                         try:
-                            local_path = task.result()
-                            if local_path:
-                                for p in pending:
-                                    p.cancel()
-                                audio = _make_audio_stream(local_path)
-                                await _do_play(chat_id, audio)
-                                _active_chats.add(chat_id)
-                                LOG.info("Streaming audio (pre-check concurrent recovery) in %s: %s", chat_id, title)
-                                recovered = True
-                                pending = set()
-                                break
+                            audio = _make_audio_stream(result)
+                            await _do_play(chat_id, audio)
+                            _active_chats.add(chat_id)
+                            LOG.info("Streaming audio (pre-check download recovery) in %s: %s", chat_id, title)
+                            recovered = True
+                            break
                         except Exception:
                             pass
+                # If no local file, try stream URL results
+                if not recovered:
+                    for result in results:
+                        if isinstance(result, str) and result and not os.path.isfile(result):
+                            try:
+                                audio = _make_audio_stream(result)
+                                await _do_play(chat_id, audio)
+                                _active_chats.add(chat_id)
+                                LOG.info("Streaming audio (pre-check stream recovery) in %s: %s", chat_id, title)
+                                recovered = True
+                                break
+                            except Exception:
+                                pass
                 if recovered:
                     return
             raise FileNotFoundError(f"Stream URL expired and all fallbacks failed for: {title or media_path[:80]}")
@@ -1146,16 +1154,25 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
 
     # ── Run ALL platforms concurrently ──────────────────────────
     async def _try_youtube():
-        """Try YouTube: stream URL first, then download."""
+        """Try YouTube: download first (reliable), stream URL as backup."""
         try:
             from MusicLyrics.plugins.play.platforms.youtube import (
                 get_audio_stream_url, get_video_stream_url,
                 is_youtube_url, search_and_download_audio as yt_search_dl,
                 search_and_download_video as yt_search_dl_video,
                 search_youtube as _yt_search,
+                download_audio as _yt_dl_audio,
             )
 
-            # Try re-fetch stream URL if we have the original YouTube URL
+            # Priority 1: Download by title (most reliable — no expiring URLs)
+            if item.stream_type == "video":
+                path, info = await yt_search_dl_video(item.title)
+            else:
+                path, info = await yt_search_dl(item.title)
+            if path and _os.path.isfile(str(path)):
+                return path, False, "youtube"
+
+            # Priority 2: Try re-fetch stream URL if we have the original YouTube URL
             if is_youtube_url(item.url):
                 if item.stream_type == "video":
                     new_url = await get_video_stream_url(item.url)
@@ -1164,7 +1181,7 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
                 if new_url:
                     return new_url, True, "youtube"
 
-            # Try search by title → get stream URL (faster than download)
+            # Priority 3: Try search by title -> get stream URL
             yt_result = await _yt_search(item.title)
             if yt_result and yt_result.get("url"):
                 if item.stream_type == "video":
@@ -1174,13 +1191,6 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
                 if new_url:
                     return new_url, True, "youtube"
 
-            # Try search+download by title (local file — last resort)
-            if item.stream_type == "video":
-                path, info = await yt_search_dl_video(item.title)
-            else:
-                path, info = await yt_search_dl(item.title)
-            if path and _os.path.isfile(str(path)):
-                return path, False, "youtube"
         except Exception as e:
             LOG.debug("fresh_resolve: YouTube failed for '%s': %s", item.title, e)
         return None, False, ""
