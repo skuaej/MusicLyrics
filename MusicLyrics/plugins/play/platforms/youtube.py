@@ -1513,66 +1513,43 @@ def _ytdlp_search_sync(query: str, max_results: int = 1) -> Optional[dict]:
 
 
 async def _validate_stream_url(url: str) -> bool:
-    """Validate that a stream URL is actually reachable and returns audio/video.
+    """Quick validation that a stream URL is reachable.
 
-    This prevents passing dead/expired URLs to py-tgcalls which causes
-    no-sound issues.  Uses a range request (first few bytes) instead of
-    HEAD because some CDNs (YouTube, Piped proxies) reject HEAD requests.
-
-    Returns True if URL is valid and streamable, False otherwise.
+    LENIENT by design — only rejects clearly dead URLs (403, 410, 404).
+    On any doubt (timeout, unexpected status, connection error), returns
+    True and lets py-tgcalls / ffmpeg handle it.  The previous version
+    was too strict and rejected valid YouTube CDN URLs.
     """
     if not url or not url.startswith("http"):
         return False
     # HLS manifests (.m3u8) are always accepted — ffmpeg handles them
     if ".m3u8" in url or "manifest/hls" in url:
         return True
+    # Known good CDN domains — skip validation entirely
+    if any(d in url for d in ("googlevideo.com", "ytimg.com", "ggpht.com",
+                               "sndcdn.com", "soundcloud.com", "saavn.com",
+                               "cobalt.tools")):
+        return True
     try:
         async with aiohttp.ClientSession() as session:
-            # Use GET with Range header (first 1KB) — more reliable than HEAD
-            headers = {
-                **_PROXY_HEADERS,
-                "Range": "bytes=0-1023",
-            }
-            async with session.get(
+            async with session.head(
                 url,
-                headers=headers,
+                headers=_PROXY_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=3, connect=1.5),
                 allow_redirects=True,
             ) as resp:
-                if resp.status in (200, 206):
-                    # Check content type — must be audio/video, not HTML error page
-                    ct = resp.content_type or ""
-                    if ct.startswith(("audio/", "video/", "application/octet",
-                                      "binary/", "application/ogg")):
-                        return True
-                    # Some CDNs don't set content-type correctly, check size
-                    body = await resp.read()
-                    if len(body) > 100:
-                        # Not an HTML error page
-                        if not body[:50].lstrip().startswith((b"<", b"{")):
-                            return True
-                    LOG.debug("Stream URL returned wrong content-type '%s': %s",
-                             ct, url[:80])
-                    return False
-                elif resp.status in (301, 302, 303, 307, 308):
-                    # Redirect — assume OK, py-tgcalls/ffmpeg will follow
+                if resp.status < 400:
                     return True
-                elif resp.status == 403:
-                    LOG.warning("Stream URL returned 403 (blocked/expired): %s", url[:80])
+                if resp.status in (403, 404, 410, 451):
+                    LOG.warning("Stream URL returned HTTP %d (dead): %s",
+                               resp.status, url[:80])
                     return False
-                elif resp.status == 410:
-                    LOG.warning("Stream URL returned 410 (gone/expired): %s", url[:80])
-                    return False
-                else:
-                    LOG.debug("Stream URL returned HTTP %d: %s", resp.status, url[:80])
-                    return False
+                # Other 4xx/5xx — let py-tgcalls try anyway
+                return True
     except asyncio.TimeoutError:
-        # On timeout, assume OK — slow CDN, let py-tgcalls try
-        return True
-    except Exception as e:
-        LOG.debug("Stream URL validation error: %s for %s", e, url[:80])
-        # On connection errors, URL is likely dead
-        return False
+        return True  # Slow CDN — let py-tgcalls handle it
+    except Exception:
+        return True  # Connection error — try anyway
 
 
 async def get_audio_stream_url(url: str) -> Optional[str]:

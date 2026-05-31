@@ -440,16 +440,40 @@ async def _resolve_query(query: str, platform: str, msg: Message):
 
     # -- Plain text query --
     # PRIORITY:
-    # Step 1: YouTube stream URL + yt-dlp search+download CONCURRENT (both YouTube)
+    # Step 1: YouTube yt-dlp search+download FIRST (most reliable — file doesn't expire)
+    #         + YouTube stream URL CONCURRENT (faster but may expire)
+    #         Prefer download result if both succeed
     # Step 2: ONLY if Step 1 fails: JioSaavn + SoundCloud concurrent
 
     import asyncio as _aio
 
-    # ── Step 1: YouTube stream URL + yt-dlp download CONCURRENT ──
-    LOG.info("Query search: YouTube stream URL + yt-dlp CONCURRENT for: %s", query)
+    # ── Step 1: yt-dlp download (PRIORITY) + stream URL CONCURRENT ──
+    LOG.info("Query search: yt-dlp download + YouTube stream URL CONCURRENT for: %s", query)
+
+    _yt_download_result = None
+    _yt_stream_result = None
+
+    async def _yt_dlp_download():
+        """yt-dlp search+download (file-based — PREFERRED, no expiry)."""
+        nonlocal _yt_download_result
+        try:
+            fp, dl_info = await search_and_download_audio(query)
+            if fp and os.path.isfile(fp):
+                LOG.info("yt-dlp search+download succeeded for: %s", query)
+                if dl_info:
+                    if dl_info.get("duration", 0) > Config.DURATION_LIMIT_MIN * 60 and dl_info["duration"] > 0:
+                        return None
+                    _yt_download_result = (dl_info, fp, False)
+                    return _yt_download_result
+                _yt_download_result = ({"title": "Unknown", "url": "", "duration": 0, "thumbnail": "", "channel": ""}, fp, False)
+                return _yt_download_result
+        except Exception:
+            pass
+        return None
 
     async def _yt_stream_url():
-        """YouTube search → stream URL (instant playback)."""
+        """YouTube search → stream URL (faster but URLs may expire on cloud)."""
+        nonlocal _yt_stream_result
         try:
             yt = await search_youtube(query)
             if not yt:
@@ -459,42 +483,25 @@ async def _resolve_query(query: str, platform: str, msg: Message):
             su = await get_audio_stream_url(yt["url"])
             if su:
                 LOG.info("YouTube stream URL succeeded for: %s", query)
-                return yt, su, True
-        except Exception:
-            pass
-        return None
-
-    async def _yt_dlp_download():
-        """yt-dlp search+download (file-based)."""
-        try:
-            fp, dl_info = await search_and_download_audio(query)
-            if fp and os.path.isfile(fp):
-                LOG.info("yt-dlp search+download succeeded for: %s", query)
-                if dl_info:
-                    if dl_info.get("duration", 0) > Config.DURATION_LIMIT_MIN * 60 and dl_info["duration"] > 0:
-                        return None
-                    return dl_info, fp, False
-                return {"title": "Unknown", "url": "", "duration": 0, "thumbnail": "", "channel": ""}, fp, False
+                _yt_stream_result = (yt, su, True)
+                return _yt_stream_result
         except Exception:
             pass
         return None
 
     yt_tasks = [
-        _aio.create_task(_yt_stream_url()),
         _aio.create_task(_yt_dlp_download()),
+        _aio.create_task(_yt_stream_url()),
     ]
-    yt_pending = set(yt_tasks)
-    while yt_pending:
-        done, yt_pending = await _aio.wait(yt_pending, return_when=_aio.FIRST_COMPLETED)
-        for task in done:
-            try:
-                result = task.result()
-                if result:
-                    for p in yt_pending:
-                        p.cancel()
-                    return result
-            except Exception:
-                pass
+
+    # Wait for ALL tasks, then prefer download result
+    await _aio.gather(*yt_tasks, return_exceptions=True)
+
+    # Prefer downloaded file (reliable) over stream URL (may expire)
+    if _yt_download_result:
+        return _yt_download_result
+    if _yt_stream_result:
+        return _yt_stream_result
 
     # ── Step 2: YouTube fully failed — JioSaavn + SoundCloud concurrent ──
     LOG.info("Query search: YouTube failed, trying JioSaavn + SoundCloud for: %s", query)

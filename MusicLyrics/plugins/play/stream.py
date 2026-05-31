@@ -93,6 +93,11 @@ async def pre_join_vc(chat_id: int) -> None:
     Ensures the assistant is in the group before play() is called,
     eliminating the group-join delay from the critical path.
     If already in VC or group, does nothing.
+
+    Join methods tried in order:
+    1. Direct join by chat_id
+    2. Bot creates invite link → assistant joins via link
+    3. Bot adds assistant directly as member (addChatMembers)
     """
     if pytgcalls is None:
         return
@@ -113,14 +118,67 @@ async def pre_join_vc(chat_id: int) -> None:
         except Exception:
             pass
 
-        # Try joining the group (not VC, just group membership)
-        # This handles the common case where assistant isn't in the group yet
+        # Check if assistant is already a member of the group
+        assistant_in_group = False
+        try:
+            me = await userbot.get_me()
+            member = await bot.get_chat_member(chat_id, me.id)
+            if member and member.status not in ("left", "kicked", "banned"):
+                assistant_in_group = True
+                LOG.debug("Pre-join: Assistant already in group %s", chat_id)
+        except Exception:
+            pass
+
+        if assistant_in_group:
+            return
+
+        # Method 1: Direct join by chat_id
         try:
             await userbot.join_chat(chat_id)
-            LOG.info("Pre-join: Assistant joined group %s", chat_id)
-        except Exception:
-            # Already in group or can't join - either way, continue
-            pass
+            LOG.info("Pre-join: Assistant joined group %s by chat_id", chat_id)
+            return
+        except Exception as e:
+            LOG.debug("Pre-join: Direct join failed for %s: %s", chat_id, e)
+
+        # Method 2: Bot creates invite link → assistant joins via link
+        try:
+            invite_link = await bot.export_chat_invite_link(chat_id)
+            if invite_link:
+                await userbot.join_chat(invite_link)
+                LOG.info("Pre-join: Assistant joined group %s via invite link", chat_id)
+                return
+        except Exception as e:
+            LOG.debug("Pre-join: Invite link join failed for %s: %s", chat_id, e)
+
+        # Method 3: Bot creates a fresh invite link → assistant joins
+        try:
+            new_link = await bot.create_chat_invite_link(
+                chat_id, name="Assistant Auto-Join", member_limit=1
+            )
+            if new_link and new_link.invite_link:
+                await userbot.join_chat(new_link.invite_link)
+                LOG.info("Pre-join: Assistant joined group %s via new invite link", chat_id)
+                # Revoke the one-time link
+                try:
+                    await bot.revoke_chat_invite_link(chat_id, new_link.invite_link)
+                except Exception:
+                    pass
+                return
+        except Exception as e:
+            LOG.debug("Pre-join: New invite link join failed for %s: %s", chat_id, e)
+
+        # Method 4: Bot adds assistant directly as a member
+        try:
+            me = await userbot.get_me()
+            await bot.add_chat_members(chat_id, me.id)
+            LOG.info("Pre-join: Bot added assistant %s to group %s directly",
+                     me.id, chat_id)
+            return
+        except Exception as e:
+            LOG.debug("Pre-join: Direct add failed for %s: %s", chat_id, e)
+
+        LOG.warning("Pre-join: All methods failed for %s — will retry in _do_play",
+                    chat_id)
 
     except Exception as e:
         LOG.debug("Pre-join VC failed for %s: %s", chat_id, e)
@@ -577,17 +635,20 @@ async def _do_play(chat_id: int, stream):
         return
 
     # If first attempt failed, assistant might not be in the group yet.
-    # Try to auto-join the group, then retry play.
+    # Try multiple methods to auto-join the group, then retry play.
     LOG.info("Play failed for %s — trying to auto-join assistant to the group", chat_id)
     joined = False
+
+    # Method 1: Direct join by chat_id
     try:
-        # Try joining by chat_id directly
         await userbot.join_chat(chat_id)
         joined = True
         LOG.info("Assistant auto-joined group %s by chat ID", chat_id)
     except Exception as e:
         LOG.debug("Assistant join by chat_id failed: %s", e)
-        # Try via bot-generated invite link
+
+    # Method 2: Bot creates invite link → assistant joins
+    if not joined:
         try:
             invite_link = await bot.export_chat_invite_link(chat_id)
             if invite_link:
@@ -596,6 +657,33 @@ async def _do_play(chat_id: int, stream):
                 LOG.info("Assistant auto-joined group %s via invite link", chat_id)
         except Exception as e2:
             LOG.debug("Assistant join via invite link failed: %s", e2)
+
+    # Method 3: Bot creates fresh one-time invite link → assistant joins
+    if not joined:
+        try:
+            new_link = await bot.create_chat_invite_link(
+                chat_id, name="Auto-Join", member_limit=1
+            )
+            if new_link and new_link.invite_link:
+                await userbot.join_chat(new_link.invite_link)
+                joined = True
+                LOG.info("Assistant auto-joined group %s via fresh invite link", chat_id)
+                try:
+                    await bot.revoke_chat_invite_link(chat_id, new_link.invite_link)
+                except Exception:
+                    pass
+        except Exception as e3:
+            LOG.debug("Assistant join via fresh invite link failed: %s", e3)
+
+    # Method 4: Bot adds assistant directly as member
+    if not joined:
+        try:
+            me = await userbot.get_me()
+            await bot.add_chat_members(chat_id, me.id)
+            joined = True
+            LOG.info("Bot added assistant %s to group %s directly", me.id, chat_id)
+        except Exception as e4:
+            LOG.debug("Bot add_chat_members failed: %s", e4)
 
     if joined:
         await asyncio.sleep(0.3)  # Brief pause for Telegram to register the join
