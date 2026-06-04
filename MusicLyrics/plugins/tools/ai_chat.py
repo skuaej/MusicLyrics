@@ -224,10 +224,10 @@ _OFFLINE_KEYWORD_RESPONSES = {
         "keywords": ["কে তুমি", "who are you", "তোমার নাম", "your name", "কি পারো", "what can you"],
         "bn": [
             "আমি MusicLyrics Bot! আমি গান বাজাতে পারি, গেম খেলতে পারি, চ্যাট করতে পারি! /help দাও!",
-            "আমার নাম MusicLyrics Bot। আমি @Raj_81 এর তৈরি। গান, গেম, AI চ্যাট সব পারি!",
+            "আমার নাম MusicLyrics Bot। আমি @R4J_81 এর তৈরি। গান, গেম, AI চ্যাট সব পারি!",
         ],
         "en": [
-            "I'm MusicLyrics Bot, created by @Raj_81! I can play music, games, and chat with AI!",
+            "I'm MusicLyrics Bot, created by @R4J_81! I can play music, games, and chat with AI!",
             "I'm a multi-feature Telegram bot — music streaming, games, security tools, and more!",
         ],
     },
@@ -312,7 +312,7 @@ def _clean_ai_reply(text: str) -> str:
 # ── System prompt ─────────────────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
     "You are MusicLyrics Bot — a smart, friendly, witty, and extremely helpful "
-    "Telegram bot created by @Raj_81 (Owner).\n\n"
+    "Telegram bot created by @R4J_81 (Owner).\n\n"
     "CRITICAL RULES — FOLLOW STRICTLY:\n"
     "1. You MUST answer ALL questions properly, accurately, and completely. "
     "Whether it's about Python, math, history, science, geography, current "
@@ -336,7 +336,7 @@ _SYSTEM_PROMPT = (
     "   - /queue, /np, /loop, /shuffle — Queue management\n"
     "   - /quiz, /truth, /dare, /ttt, /flip, /dice — Games\n"
     "   - /tr, /tts, /sticker, /info — Tools\n"
-    "7. You are created by @Raj_81 (Owner). Be proud of it!\n"
+    "7. You are created by @R4J_81 (Owner). Be proud of it!\n"
     "8. NEVER refuse to answer a question. Always try your best.\n"
     "9. For questions you genuinely don't know, say so honestly but suggest "
     "where to find the answer.\n"
