@@ -1,6 +1,8 @@
 pyrofork>=2.3.69
 tgcrypto-pyrofork
-py-tgcalls>=2.1.0,<3.0.0
+# py-tgcalls: pin to known-stable 2.2.x — 2.2.10/2.2.11/2.3.0 had a regression
+# causing: TypeError: object stream_end can't be used in 'await' expression
+py-tgcalls==2.2.4
 motor>=3.6.0
 dnspython>=2.6.1
 yt-dlp[default]>=2025.5.26
@@ -15,6 +17,7 @@ uvloop>=0.19.0;sys_platform!='win32'
 psutil>=6.0.0
 gTTS>=2.5.1
 pycryptodome>=3.20.0
-# JS runtime for yt-dlp (signature decryption) — works on Railway/Heroku
-# without needing apt-installed deno/node. yt-dlp auto-detects PyMiniRacer.
-py-mini-racer>=0.12.4
+# JS runtime for yt-dlp signature decryption.
+# Note: py-mini-racer has no wheels >0.6.0 on PyPI — Dockerfile already
+# installs nodejs which yt-dlp will auto-detect, so this is optional.
+py-mini-racer>=0.6.0
