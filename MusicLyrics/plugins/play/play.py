@@ -106,59 +106,34 @@ async def _get_audio_media(url: str) -> tuple[str, bool]:
     """Get media path for audio playback.
 
     Returns (media_path, is_stream_url).
-    PRIORITY:
-    Step 1: yt-dlp download + YouTube stream URL CONCURRENT
-            — prefer downloaded file (reliable) over stream URL (expires)
-    Step 2: ONLY if Step 1 fails: title-search + JioSaavn + SoundCloud
+    PRIORITY (user-requested, matches /vplay flow):
+    Step 1: yt-dlp download FIRST (sequential await) — most reliable
+    Step 2: ONLY if Step 1 fails: YouTube stream URL
+    Step 3: ONLY if Step 2 fails: title-search + JioSaavn + SoundCloud
     """
     import asyncio as _aio
 
-    # ── Step 1: Download + Stream URL CONCURRENT ──
-    # Download is PREFERRED because stream URLs expire quickly on cloud servers
-    LOG.info("Trying yt-dlp download + YouTube stream URL CONCURRENTLY for: %s", url)
+    # ── Step 1: yt-dlp direct download FIRST (strict priority) ──
+    LOG.info("Trying yt-dlp direct download FIRST for: %s", url)
+    try:
+        fp = await download_audio(url)
+        if fp and os.path.isfile(fp):
+            LOG.info("yt-dlp direct download succeeded for: %s", url)
+            return fp, False
+    except Exception as e:
+        LOG.debug("yt-dlp direct download failed for %s: %s", url, e)
 
-    _download_result = None
-    _stream_result = None
+    # ── Step 2: YouTube stream URL fallback ──
+    LOG.info("Direct download failed, trying YouTube stream URL for: %s", url)
+    try:
+        su = await get_audio_stream_url(url)
+        if su:
+            LOG.info("Stream URL obtained for: %s", url)
+            return su, True
+    except Exception as e:
+        LOG.debug("Stream URL extraction failed for %s: %s", url, e)
 
-    async def _try_ytdlp_direct():
-        nonlocal _download_result
-        try:
-            fp = await download_audio(url)
-            if fp and os.path.isfile(fp):
-                LOG.info("yt-dlp download succeeded for: %s", url)
-                _download_result = (fp, False)
-                return fp, False
-        except Exception:
-            pass
-        return None
-
-    async def _try_stream_url():
-        nonlocal _stream_result
-        try:
-            su = await get_audio_stream_url(url)
-            if su:
-                LOG.info("Stream URL obtained for: %s", url)
-                _stream_result = (su, True)
-                return su, True
-        except Exception:
-            pass
-        return None
-
-    yt_tasks = [
-        _aio.create_task(_try_ytdlp_direct()),
-        _aio.create_task(_try_stream_url()),
-    ]
-
-    # Wait for ALL tasks (not FIRST_COMPLETED) so we can prefer download
-    await _aio.gather(*yt_tasks, return_exceptions=True)
-
-    # Prefer downloaded file over stream URL (stream URLs expire)
-    if _download_result:
-        return _download_result
-    if _stream_result:
-        return _stream_result
-
-    # ── Step 2: YouTube failed — title-search + JioSaavn + SoundCloud ──
+    # ── Step 3: YouTube failed — title-search + JioSaavn + SoundCloud ──
     LOG.info("YouTube methods failed, trying title-search + JioSaavn + SoundCloud for: %s", url)
 
     from MusicLyrics.plugins.play.platforms.youtube import get_video_info
@@ -439,71 +414,52 @@ async def _resolve_query(query: str, platform: str, msg: Message):
         return info, media_path, is_stream
 
     # -- Plain text query --
-    # PRIORITY:
-    # Step 1: YouTube yt-dlp search+download FIRST (most reliable — file doesn't expire)
-    #         + YouTube stream URL CONCURRENT (faster but may expire)
-    #         Prefer download result if both succeed
-    # Step 2: ONLY if Step 1 fails: JioSaavn + SoundCloud concurrent
+    # PRIORITY (user-requested, matches /vplay flow):
+    # Step 1: YouTube yt-dlp search+download FIRST (sequential await — strictly prioritised)
+    # Step 2: ONLY if Step 1 fails: YouTube stream URL
+    # Step 3: ONLY if Step 2 fails: JioSaavn + SoundCloud concurrent
 
     import asyncio as _aio
 
-    # ── Step 1: yt-dlp download (PRIORITY) + stream URL CONCURRENT ──
-    LOG.info("Query search: yt-dlp download + YouTube stream URL CONCURRENT for: %s", query)
+    # ── Step 1: yt-dlp search+download (STRICT FIRST PRIORITY) ──
+    LOG.info("Query search: yt-dlp search+download FIRST (sequential) for: %s", query)
+    try:
+        fp, dl_info = await search_and_download_audio(query)
+        if fp and os.path.isfile(fp):
+            LOG.info("yt-dlp search+download succeeded for: %s", query)
+            if dl_info:
+                if dl_info.get("duration", 0) > Config.DURATION_LIMIT_MIN * 60 and dl_info["duration"] > 0:
+                    raise ValueError(
+                        f"গানটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি, "
+                        "play করা যাবে না।"
+                    )
+                return dl_info, fp, False
+            return ({"title": "Unknown", "url": "", "duration": 0, "thumbnail": "", "channel": ""}, fp, False)
+    except ValueError:
+        raise
+    except Exception as e:
+        LOG.info("yt-dlp search+download failed for '%s': %s", query, e)
 
-    _yt_download_result = None
-    _yt_stream_result = None
-
-    async def _yt_dlp_download():
-        """yt-dlp search+download (file-based — PREFERRED, no expiry)."""
-        nonlocal _yt_download_result
-        try:
-            fp, dl_info = await search_and_download_audio(query)
-            if fp and os.path.isfile(fp):
-                LOG.info("yt-dlp search+download succeeded for: %s", query)
-                if dl_info:
-                    if dl_info.get("duration", 0) > Config.DURATION_LIMIT_MIN * 60 and dl_info["duration"] > 0:
-                        return None
-                    _yt_download_result = (dl_info, fp, False)
-                    return _yt_download_result
-                _yt_download_result = ({"title": "Unknown", "url": "", "duration": 0, "thumbnail": "", "channel": ""}, fp, False)
-                return _yt_download_result
-        except Exception:
-            pass
-        return None
-
-    async def _yt_stream_url():
-        """YouTube search → stream URL (faster but URLs may expire on cloud)."""
-        nonlocal _yt_stream_result
-        try:
-            yt = await search_youtube(query)
-            if not yt:
-                return None
+    # ── Step 2: YouTube stream URL fallback ──
+    LOG.info("Query search: search+download failed, trying YouTube stream URL for: %s", query)
+    try:
+        yt = await search_youtube(query)
+        if yt:
             if yt["duration"] > Config.DURATION_LIMIT_MIN * 60 and yt["duration"] > 0:
-                return None
+                raise ValueError(
+                    f"গানটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি, "
+                    "play করা যাবে না।"
+                )
             su = await get_audio_stream_url(yt["url"])
             if su:
                 LOG.info("YouTube stream URL succeeded for: %s", query)
-                _yt_stream_result = (yt, su, True)
-                return _yt_stream_result
-        except Exception:
-            pass
-        return None
+                return yt, su, True
+    except ValueError:
+        raise
+    except Exception as e:
+        LOG.info("YouTube stream URL failed for '%s': %s", query, e)
 
-    yt_tasks = [
-        _aio.create_task(_yt_dlp_download()),
-        _aio.create_task(_yt_stream_url()),
-    ]
-
-    # Wait for ALL tasks, then prefer download result
-    await _aio.gather(*yt_tasks, return_exceptions=True)
-
-    # Prefer downloaded file (reliable) over stream URL (may expire)
-    if _yt_download_result:
-        return _yt_download_result
-    if _yt_stream_result:
-        return _yt_stream_result
-
-    # ── Step 2: YouTube fully failed — JioSaavn + SoundCloud concurrent ──
+    # ── Step 3: YouTube fully failed — JioSaavn + SoundCloud concurrent ──
     LOG.info("Query search: YouTube failed, trying JioSaavn + SoundCloud for: %s", query)
 
     async def _jiosaavn_search_and_stream():
