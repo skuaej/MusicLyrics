@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from pyrogram import Client, filters
@@ -40,6 +41,7 @@ from MusicLyrics.plugins.play.stream import (
     _start_progress_timer,
     _stop_progress_timer,
     _get_skip_lock,
+    acquire_skip_lock,
     _add_reaction,
     suppress_next_stream_end,
     _fresh_resolve_and_play,
@@ -98,9 +100,12 @@ async def skip_cmd(client: Client, message: Message):
         await _add_reaction(chat_id, message.id)
         return
 
-    # Acquire skip lock to prevent race with auto-next
-    lock = _get_skip_lock(chat_id)
-    async with lock:
+    # Acquire skip lock to prevent race with auto-next.
+    # acquire_skip_lock has a built-in timeout — if the previous holder
+    # wedged (e.g. pytgcalls.play() hung), the lock is force-replaced so
+    # this command can still proceed instead of deadlocking forever.
+    lock = await acquire_skip_lock(chat_id, timeout=12.0)
+    try:
         # Stop progress timer
         _stop_progress_timer(chat_id)
 
@@ -130,8 +135,17 @@ async def skip_cmd(client: Client, message: Message):
             # Adding it here causes DOUBLE suppression — the real stream-end
             # for the NEW track also gets swallowed, breaking auto-next.
 
-            # Fresh-resolve media across platforms (YouTube first)
-            success = await _fresh_resolve_and_play(chat_id, next_item)
+            # Fresh-resolve media across platforms (YouTube first).
+            # Wrapped with timeout so a wedged resolve cannot freeze the
+            # chat — on timeout we fail fast and the caller can try again.
+            try:
+                success = await asyncio.wait_for(
+                    _fresh_resolve_and_play(chat_id, next_item),
+                    timeout=25.0,
+                )
+            except asyncio.TimeoutError:
+                LOG.warning("Skip resolve+play TIMED OUT for %s", chat_id)
+                success = False
 
             # As soon as the new track starts, kick off prefetch for the
             # following one so the next /skip is also instant.
@@ -150,7 +164,10 @@ async def skip_cmd(client: Client, message: Message):
                     if fallback_item is None:
                         break
                     try:
-                        success = await _fresh_resolve_and_play(chat_id, fallback_item)
+                        success = await asyncio.wait_for(
+                            _fresh_resolve_and_play(chat_id, fallback_item),
+                            timeout=25.0,
+                        )
                         if success:
                             next_item = fallback_item
                             break
@@ -189,6 +206,11 @@ async def skip_cmd(client: Client, message: Message):
             LOG.exception("Skip failed in %s", chat_id)
             reply = await message.reply_text("❌ পরের গানে যেতে সমস্যা হয়েছে।")
             await _add_reaction(chat_id, message.id)
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass
 
 
 # ── /stop | /end ─────────────────────────────────────────────────────────────
@@ -201,9 +223,11 @@ async def stop_cmd(client: Client, message: Message):
         await _add_reaction(chat_id, message.id)
         return
 
-    # Acquire skip lock to prevent race with auto-next
-    lock = _get_skip_lock(chat_id)
-    async with lock:
+    # Acquire skip lock to prevent race with auto-next.
+    # Timeout-aware acquire: if a previous play() wedged, we replace the
+    # lock so /stop always works.
+    lock = await acquire_skip_lock(chat_id, timeout=10.0)
+    try:
         # Stop progress timer
         _stop_progress_timer(chat_id)
 
@@ -222,6 +246,11 @@ async def stop_cmd(client: Client, message: Message):
             "✅ Queue clear করে voice chat থেকে বের হয়ে গেছি।"
         )
         await _add_reaction(chat_id, message.id)
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass
 
 
 # ── /seek <seconds> ──────────────────────────────────────────────────────────
@@ -420,9 +449,11 @@ async def cb_skip(client: Client, callback: CallbackQuery):
     except Exception:
         pass
 
-    # Acquire skip lock to prevent race with auto-next
-    lock = _get_skip_lock(chat_id)
-    async with lock:
+    # Acquire skip lock to prevent race with auto-next.
+    # acquire_skip_lock force-replaces a wedged lock so the chat never
+    # becomes unresponsive after a single bad skip.
+    lock = await acquire_skip_lock(chat_id, timeout=12.0)
+    try:
         if not is_active(chat_id):
             return
 
@@ -456,8 +487,16 @@ async def cb_skip(client: Client, callback: CallbackQuery):
             # Double suppression causes the NEW track's stream-end to be
             # swallowed too, breaking auto-next / sequential playback.
 
-            # Fresh-resolve media across platforms (YouTube first)
-            success = await _fresh_resolve_and_play(chat_id, next_item)
+            # Fresh-resolve media across platforms (YouTube first), guarded
+            # with a timeout so a wedged resolve cannot freeze the chat.
+            try:
+                success = await asyncio.wait_for(
+                    _fresh_resolve_and_play(chat_id, next_item),
+                    timeout=25.0,
+                )
+            except asyncio.TimeoutError:
+                LOG.warning("cb_skip resolve+play TIMED OUT for %s", chat_id)
+                success = False
 
             # As soon as the new track starts, kick off prefetch for the
             # following one so the next /skip is also instant.
@@ -476,7 +515,10 @@ async def cb_skip(client: Client, callback: CallbackQuery):
                     if fallback_item is None:
                         break
                     try:
-                        success = await _fresh_resolve_and_play(chat_id, fallback_item)
+                        success = await asyncio.wait_for(
+                            _fresh_resolve_and_play(chat_id, fallback_item),
+                            timeout=25.0,
+                        )
                         if success:
                             next_item = fallback_item
                             break
@@ -518,6 +560,11 @@ async def cb_skip(client: Client, callback: CallbackQuery):
                 err_reply = await callback.message.reply_text("❌ Skip করা যায়নি। আবার চেষ্টা করুন।")
             except Exception:
                 pass
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass
 
 
 @bot.on_callback_query(filters.regex(r"^ctl_stop$"))

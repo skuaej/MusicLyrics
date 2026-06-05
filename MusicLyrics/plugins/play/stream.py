@@ -122,6 +122,36 @@ def _get_skip_lock(chat_id: int) -> asyncio.Lock:
         _skip_locks[chat_id] = asyncio.Lock()
     return _skip_locks[chat_id]
 
+
+async def acquire_skip_lock(chat_id: int, timeout: float = 12.0) -> asyncio.Lock:
+    """Acquire the skip lock with a timeout.
+
+    If the existing lock is stuck (held longer than *timeout* seconds — e.g.
+    because a previous pytgcalls.play() hung), drop it and create a fresh
+    one so the new command can proceed.  This prevents the entire chat from
+    becoming unresponsive after a single wedged skip / play.
+
+    The returned Lock is ALREADY acquired — caller must release it
+    (use ``try/finally`` instead of ``async with``).
+    """
+    lock = _get_skip_lock(chat_id)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        return lock
+    except asyncio.TimeoutError:
+        LOG.warning(
+            "acquire_skip_lock: lock for %s stuck > %.1fs — forcing fresh lock",
+            chat_id, timeout,
+        )
+        # Best-effort: also clear suppression bucket and auto-next flag —
+        # both were probably abandoned by the wedged operation.
+        _suppress_stream_end.pop(chat_id, None)
+        _auto_next_in_progress.discard(chat_id)
+        new_lock = asyncio.Lock()
+        _skip_locks[chat_id] = new_lock
+        await new_lock.acquire()
+        return new_lock
+
 async def pre_join_vc(chat_id: int) -> None:
     """Pre-join the voice chat so streaming can start instantly.
 
@@ -629,37 +659,58 @@ async def _do_play(chat_id: int, stream):
     if chat_id in _active_chats:
         suppress_next_stream_end(chat_id)
 
+    # Per-method hard timeout — pytgcalls.play() has been observed to hang
+    # forever on flaky networks / dropped assistant connections.  Without
+    # this timeout the caller's skip-lock would never be released and EVERY
+    # subsequent music command would deadlock.
+    PLAY_METHOD_TIMEOUT = 15.0
+
     async def _try_play():
         """Attempt all play methods — returns True on success."""
         # Method 1: play() with GroupCallConfig (py-tgcalls >= 2.1)
         if _HAS_GROUP_CALL_CONFIG:
             try:
-                await pytgcalls.play(
-                    chat_id, stream,
-                    config=GroupCallConfig(auto_start=True),
+                await asyncio.wait_for(
+                    pytgcalls.play(
+                        chat_id, stream,
+                        config=GroupCallConfig(auto_start=True),
+                    ),
+                    timeout=PLAY_METHOD_TIMEOUT,
                 )
                 _active_chats.add(chat_id)
                 LOG.info("play() with GroupCallConfig succeeded for %s", chat_id)
                 return True
+            except asyncio.TimeoutError:
+                LOG.warning("play() with GroupCallConfig TIMED OUT for %s", chat_id)
             except (TypeError, AttributeError) as e:
                 LOG.debug("play() with GroupCallConfig failed: %s", e)
 
         # Method 2: plain play() (py-tgcalls 2.2.x)
         try:
-            await pytgcalls.play(chat_id, stream)
+            await asyncio.wait_for(
+                pytgcalls.play(chat_id, stream),
+                timeout=PLAY_METHOD_TIMEOUT,
+            )
             _active_chats.add(chat_id)
             LOG.info("play() succeeded for %s", chat_id)
             return True
+        except asyncio.TimeoutError:
+            LOG.warning("plain play() TIMED OUT for %s", chat_id)
         except Exception as e:
             LOG.debug("play() failed: %s", e)
 
         # Method 3: explicit join_group_call (older py-tgcalls)
         if hasattr(pytgcalls, 'join_group_call'):
             try:
-                await pytgcalls.join_group_call(chat_id, stream)
+                await asyncio.wait_for(
+                    pytgcalls.join_group_call(chat_id, stream),
+                    timeout=PLAY_METHOD_TIMEOUT,
+                )
                 _active_chats.add(chat_id)
                 LOG.info("join_group_call() succeeded for %s", chat_id)
                 return True
+            except asyncio.TimeoutError:
+                LOG.warning("join_group_call() TIMED OUT for %s", chat_id)
             except Exception as e:
                 LOG.debug("join_group_call() also failed: %s", e)
 
@@ -1525,9 +1576,10 @@ async def _on_stream_end(client, update):
 
     _auto_next_in_progress.add(chat_id)
     try:
-        # Acquire per-chat skip lock — waits if manual skip/stop is in progress
-        lock = _get_skip_lock(chat_id)
-        async with lock:
+        # Acquire per-chat skip lock — waits if manual skip/stop is in progress.
+        # Timeout-aware so a wedged previous holder cannot freeze auto-next forever.
+        lock = await acquire_skip_lock(chat_id, timeout=12.0)
+        try:
             # Re-check if chat is still active (may have been stopped while waiting for lock)
             if chat_id not in _active_chats:
                 LOG.info("Chat %s no longer active, skipping auto-next", chat_id)
@@ -1656,6 +1708,11 @@ async def _on_stream_end(client, update):
                 except Exception:
                     pass
                 await leave_voice_chat(chat_id)
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
     finally:
         _auto_next_in_progress.discard(chat_id)
 
@@ -1865,6 +1922,37 @@ if pytgcalls is not None:
                 LOG.debug("VC orphan reaper error: %s", e)
 
     asyncio.get_event_loop().create_task(_vc_orphan_reaper())
+
+    # ── Watchdog: age out wedged _auto_next_in_progress flags ──
+    # If anything inside _on_stream_end's lock body crashed before the
+    # `finally` ran, the chat would be marked auto-next forever and all
+    # subsequent natural stream-end events would be silently dropped.
+    # This watchdog drops entries older than the limit.
+    async def _auto_next_watchdog():
+        AGE_LIMIT_SEC = 45.0
+        seen_at: dict[int, float] = {}
+        while True:
+            await asyncio.sleep(10)
+            try:
+                now = time.time()
+                # Stamp newly-seen chats; clear stamps for chats no longer in the set.
+                for cid in list(_auto_next_in_progress):
+                    seen_at.setdefault(cid, now)
+                for cid in list(seen_at):
+                    if cid not in _auto_next_in_progress:
+                        seen_at.pop(cid, None)
+                        continue
+                    if now - seen_at[cid] > AGE_LIMIT_SEC:
+                        LOG.warning(
+                            "auto_next watchdog: clearing stuck flag for %s (age=%.0fs)",
+                            cid, now - seen_at[cid],
+                        )
+                        _auto_next_in_progress.discard(cid)
+                        seen_at.pop(cid, None)
+            except Exception as e:
+                LOG.debug("auto_next watchdog error: %s", e)
+
+    asyncio.get_event_loop().create_task(_auto_next_watchdog())
 
     # ── ALSO register on_kicked / on_left to clean up ──
     try:

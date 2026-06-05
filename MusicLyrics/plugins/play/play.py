@@ -42,6 +42,7 @@ from MusicLyrics.plugins.play.stream import (
     _add_reaction,
     leave_voice_chat,
     _get_skip_lock,
+    acquire_skip_lock,
 )
 from MusicLyrics.plugins.play.prefetch import prefetch_next, mark_resolved
 from MusicLyrics.plugins.play.platforms.youtube import (
@@ -730,8 +731,8 @@ async def playforce_command(client: Client, message: Message):
 
     # Stop current playback if active
     if is_active(chat_id):
-        lock = _get_skip_lock(chat_id)
-        async with lock:
+        lock = await acquire_skip_lock(chat_id, timeout=10.0)
+        try:
             _stop_progress_timer(chat_id)
             # Delete previous "Now Playing" messages
             if chat_id in _now_playing_messages:
@@ -742,6 +743,11 @@ async def playforce_command(client: Client, message: Message):
                         pass
                 _now_playing_messages[chat_id].clear()
             await leave_voice_chat(chat_id)
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
 
     platform = _detect_platform(query)
 
