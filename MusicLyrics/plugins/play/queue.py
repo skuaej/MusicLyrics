@@ -25,6 +25,10 @@ class QueueItem:
     stream_type: str = "audio"  # "audio" or "video"
     platform: str = "youtube"
     is_stream_url: bool = False  # True if media_path is a URL
+    # epoch seconds when media_path was last resolved — used to invalidate
+    # stale stream URLs (CDN tokens typically expire in minutes).  Zero means
+    # unknown / never resolved by the prefetcher.
+    media_resolved_at: float = 0.0
 
     # Backward compatibility alias
     @property

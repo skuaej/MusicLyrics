@@ -43,7 +43,7 @@ from MusicLyrics.plugins.play.stream import (
     leave_voice_chat,
     _get_skip_lock,
 )
-from MusicLyrics.plugins.play.prefetch import prefetch_next
+from MusicLyrics.plugins.play.prefetch import prefetch_next, mark_resolved
 from MusicLyrics.plugins.play.platforms.youtube import (
     search_youtube,
     get_audio_stream_url,
@@ -602,6 +602,7 @@ async def play_command(client: Client, message: Message):
         platform=platform if platform != "query" else "youtube",
         is_stream_url=is_stream,
     )
+    mark_resolved(item)
 
     position = await add_to_queue(chat_id, item)
 
@@ -783,6 +784,7 @@ async def playforce_command(client: Client, message: Message):
         platform=platform if platform != "query" else "youtube",
         is_stream_url=is_stream,
     )
+    mark_resolved(item)
 
     # Clear queue and add as first item
     await clear_queue(chat_id)

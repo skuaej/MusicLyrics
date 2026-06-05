@@ -39,7 +39,7 @@ from MusicLyrics.plugins.play.stream import (
     _start_progress_timer,
     _add_reaction,
 )
-from MusicLyrics.plugins.play.prefetch import prefetch_next
+from MusicLyrics.plugins.play.prefetch import prefetch_next, mark_resolved
 from MusicLyrics.plugins.play.platforms.youtube import (
     search_youtube,
     get_video_stream_url,
@@ -481,6 +481,7 @@ async def vplay_command(client: Client, message: Message):
         platform=platform if platform != "query" else "youtube",
         is_stream_url=is_stream,
     )
+    mark_resolved(item)
 
     position = await add_to_queue(chat_id, item)
 

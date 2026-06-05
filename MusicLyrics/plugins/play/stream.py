@@ -44,6 +44,7 @@ from MusicLyrics.plugins.play.prefetch import (
     prefetch_next,
     cancel_prefetch,
     is_prefetched,
+    refresh_item_if_stale,
 )
 
 LOG = logging.getLogger(__name__)
@@ -1178,7 +1179,13 @@ async def set_volume(chat_id: int, volume: int) -> bool:
 
 
 async def leave_voice_chat(chat_id: int) -> None:
-    """Leave the voice chat and clean up."""
+    """Leave the voice chat and clean up — best-effort, never raises.
+
+    Always attempts every leave method available on pytgcalls regardless of
+    our local ``_active_chats`` bookkeeping, because the two can drift out
+    of sync (e.g. pytgcalls.play() partially succeeded, or we lost track of
+    a leave event).  Cleanup of local state runs unconditionally.
+    """
     # Stop progress timer & cancel any pending prefetch immediately
     _stop_progress_timer(chat_id)
     try:
@@ -1186,45 +1193,47 @@ async def leave_voice_chat(chat_id: int) -> None:
     except Exception:
         pass
 
-    # Try leaving with retries — try BOTH methods on each attempt
     left = False
-    for attempt in range(3):
-        # Try leave_call (py-tgcalls 2.2.x)
-        try:
-            if hasattr(pytgcalls, 'leave_call'):
-                await pytgcalls.leave_call(chat_id)
-                LOG.info("Left voice chat via leave_call: %s (attempt %d)", chat_id, attempt + 1)
-                left = True
-                break
-        except Exception as e:
-            LOG.debug("leave_call attempt %d failed for %s: %s", attempt + 1, chat_id, e)
 
-        # Try leave_group_call (older py-tgcalls)
-        try:
-            if hasattr(pytgcalls, 'leave_group_call'):
-                await pytgcalls.leave_group_call(chat_id)
-                LOG.info("Left voice chat via leave_group_call: %s (attempt %d)", chat_id, attempt + 1)
-                left = True
-                break
-        except Exception as e:
-            LOG.debug("leave_group_call attempt %d failed for %s: %s", attempt + 1, chat_id, e)
-
-        # Try playing empty/silent stream then leaving (force disconnect)
-        if attempt == 2:
-            try:
-                # Last resort: try to force leave by playing nothing
-                if hasattr(pytgcalls, 'played_time'):
-                    await pytgcalls.leave_call(chat_id)
+    # Issue leave commands aggressively — both APIs, multiple retries.
+    if pytgcalls is not None:
+        for attempt in range(3):
+            for method_name in ("leave_call", "leave_group_call"):
+                fn = getattr(pytgcalls, method_name, None)
+                if fn is None:
+                    continue
+                try:
+                    await fn(chat_id)
+                    LOG.info(
+                        "leave_voice_chat: %s succeeded for %s (attempt %d)",
+                        method_name, chat_id, attempt + 1,
+                    )
                     left = True
                     break
-            except Exception:
-                pass
-
-        if attempt < 2:
-            await asyncio.sleep(1)
+                except Exception as e:
+                    # "NotInGroupCallError" etc. count as success — we're out.
+                    err_name = type(e).__name__.lower()
+                    if "notingroup" in err_name or "notjoined" in err_name or "no active call" in str(e).lower():
+                        LOG.info(
+                            "leave_voice_chat: %s reports %s already not in call for %s",
+                            method_name, chat_id, err_name,
+                        )
+                        left = True
+                        break
+                    LOG.debug(
+                        "leave_voice_chat: %s attempt %d failed for %s: %s",
+                        method_name, attempt + 1, chat_id, e,
+                    )
+            if left:
+                break
+            if attempt < 2:
+                await asyncio.sleep(0.5)
 
     if not left:
-        LOG.error("Could not leave voice chat %s after 3 attempts — forcing cleanup", chat_id)
+        LOG.error(
+            "leave_voice_chat: could NOT leave %s after retries — forcing local cleanup anyway",
+            chat_id,
+        )
 
     # Always clean up state regardless of whether leave succeeded
     _active_chats.discard(chat_id)
@@ -1261,7 +1270,11 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
     # already has a usable media_path (either set during the original /play
     # resolve, or by the background prefetcher), we go straight to streaming
     # instead of re-running search+download.
-    if is_prefetched(item):
+    #
+    # Stream URLs go stale (CDN tokens expire) so we call refresh_item_if_stale
+    # first — it returns immediately for fresh URLs / local files and does a
+    # quick re-resolve only when needed.
+    if await refresh_item_if_stale(item):
         try:
             LOG.info(
                 "fresh_resolve FAST PATH for %s: using existing media for '%s'",
@@ -1771,18 +1784,34 @@ if pytgcalls is not None:
 
     # ── Safety net: periodically ensure we have not been left sitting in VC ──
     # If _active_chats holds a chat but its queue is empty AND no progress
-    # timer is running (no track playing), force a leave.  Catches the rare
-    # edge case where stream-end fired but leave_voice_chat raised mid-way.
+    # timer is running (no track playing), force a leave.  We also probe
+    # pytgcalls.calls directly so chats that drifted out of our local
+    # bookkeeping still get cleaned up.
     async def _vc_orphan_reaper():
         from MusicLyrics.plugins.play.queue import get_chat_queue as _gcq
         while True:
             await asyncio.sleep(15)
             try:
-                for chat_id in list(_active_chats):
+                # Build a union: chats we *think* are active + chats pytgcalls
+                # thinks are active.  This catches drift in either direction.
+                suspects: set[int] = set(_active_chats)
+                try:
+                    calls = pytgcalls.calls
+                    if asyncio.iscoroutine(calls):
+                        calls = await calls
+                    if isinstance(calls, (list, set, tuple)):
+                        suspects.update(int(c) for c in calls if isinstance(c, (int, str)))
+                    elif isinstance(calls, dict):
+                        suspects.update(int(c) for c in calls.keys())
+                except Exception:
+                    pass
+
+                for chat_id in list(suspects):
                     cq = await _gcq(chat_id)
+                    # Orphan = no queue items AND no playback progress timer
                     if not cq.items and chat_id not in _play_start_times:
                         LOG.warning(
-                            "VC orphan detected for %s — queue empty and no playback; leaving",
+                            "VC orphan detected for %s — queue empty, no playback; leaving",
                             chat_id,
                         )
                         try:
