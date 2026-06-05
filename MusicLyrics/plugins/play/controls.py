@@ -12,9 +12,11 @@ from pyrogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+from pyrogram.enums import ChatType, ChatMemberStatus
 
 from MusicLyrics.bot import bot
 from MusicLyrics.helpers.filters import not_edited
+from config import Config
 from MusicLyrics.plugins.play.queue import (
     get_queue,
     get_current,
@@ -54,6 +56,43 @@ from MusicLyrics.utils.autodelete import (
 )
 
 LOG = logging.getLogger(__name__)
+
+
+# ── Admin check for inline-keyboard callbacks ────────────────────────────────
+
+async def _is_admin_callback(client: Client, callback: CallbackQuery) -> bool:
+    """Return True if the callback user may use restricted control buttons.
+
+    Allowed: bot OWNER_ID, SUDO_USERS, chat administrators / owner.
+    In a private chat anyone can use the buttons.
+    """
+    if not callback.from_user:
+        return False
+    uid = callback.from_user.id
+    if uid == Config.OWNER_ID or uid in getattr(Config, "SUDO_USERS", []):
+        return True
+    chat = callback.message.chat
+    if chat.type == ChatType.PRIVATE:
+        return True
+    try:
+        member = await client.get_chat_member(chat.id, uid)
+        return member.status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        )
+    except Exception:
+        return False
+
+
+async def _deny_non_admin(callback: CallbackQuery) -> None:
+    """Send a popup explaining the button is admin-only."""
+    try:
+        await callback.answer(
+            "⚠️ শুধু গ্রুপের admin-রা এই বাটন ব্যবহার করতে পারবেন।",
+            show_alert=True,
+        )
+    except Exception:
+        pass
 
 
 # ── /pause ───────────────────────────────────────────────────────────────────
@@ -404,6 +443,9 @@ async def shuffle_cmd(client: Client, message: Message):
 @bot.on_callback_query(filters.regex(r"^ctl_pause$"))
 async def cb_pause(client: Client, callback: CallbackQuery):
     chat_id = callback.message.chat.id
+    if not await _is_admin_callback(client, callback):
+        await _deny_non_admin(callback)
+        return
     if not is_active(chat_id):
         try:
             await callback.answer("কিছু চলছে না!", show_alert=True)
@@ -420,6 +462,9 @@ async def cb_pause(client: Client, callback: CallbackQuery):
 @bot.on_callback_query(filters.regex(r"^ctl_resume$"))
 async def cb_resume(client: Client, callback: CallbackQuery):
     chat_id = callback.message.chat.id
+    if not await _is_admin_callback(client, callback):
+        await _deny_non_admin(callback)
+        return
     if not is_active(chat_id):
         try:
             await callback.answer("কিছু চলছে না!", show_alert=True)
@@ -436,6 +481,9 @@ async def cb_resume(client: Client, callback: CallbackQuery):
 @bot.on_callback_query(filters.regex(r"^ctl_skip$"))
 async def cb_skip(client: Client, callback: CallbackQuery):
     chat_id = callback.message.chat.id
+    if not await _is_admin_callback(client, callback):
+        await _deny_non_admin(callback)
+        return
     if not is_active(chat_id):
         try:
             await callback.answer("কিছু চলছে না!", show_alert=True)
@@ -571,6 +619,10 @@ async def cb_skip(client: Client, callback: CallbackQuery):
 async def cb_stop(client: Client, callback: CallbackQuery):
     """CLOSE button — only deletes the Now Playing message, does NOT stop playback."""
     chat_id = callback.message.chat.id
+
+    if not await _is_admin_callback(client, callback):
+        await _deny_non_admin(callback)
+        return
 
     # Answer callback immediately
     try:

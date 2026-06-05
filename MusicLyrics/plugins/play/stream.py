@@ -469,6 +469,27 @@ def _control_keyboard(color: str = "") -> InlineKeyboardMarkup:
     )
 
 
+def _queue_added_keyboard(color: str = "") -> InlineKeyboardMarkup:
+    """Minimal keyboard for the "added to queue" notification.
+
+    Only the essentials — Queue (to peek at the list) and Close (to dismiss
+    the message). Playback controls (pause/resume/skip/stop) intentionally
+    omitted because they are irrelevant to a queue notification and would
+    only make the message visually crowded.
+    """
+    t = _get_current_theme()
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(f"{t['song']} Queue", callback_data="ctl_queue"),
+                InlineKeyboardButton(
+                    f"{t['close']} Close", callback_data="ctl_stop",
+                ),
+            ],
+        ]
+    )
+
+
 def _song_ended_keyboard() -> InlineKeyboardMarkup:
     """Build the 'song ended' keyboard with Add to Group button."""
     bot_username = bot.me.username if bot.me else "MusicLyrics"

@@ -34,6 +34,7 @@ from MusicLyrics.plugins.play.stream import (
     pre_join_vc,
     _now_playing_messages,
     _control_keyboard,
+    _queue_added_keyboard,
     _get_next_color,
     _get_current_theme,
     _start_progress_timer,
@@ -497,7 +498,7 @@ async def vplay_command(client: Client, message: Message):
             f"**Title:** {title}\n"
             f"**Duration:** {dur}\n"
             f"**Requested by:** {requester}",
-            reply_markup=_control_keyboard(color),
+            reply_markup=_queue_added_keyboard(color),
         )
         await _add_reaction(chat_id, message.id)
         return
