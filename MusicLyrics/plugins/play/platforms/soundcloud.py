@@ -30,6 +30,14 @@ class _SoundCloudLogger:
 
 _sc_logger = _SoundCloudLogger()
 
+# SoundCloud is NOT in the YouTube critical path — it's a last-resort
+# fallback.  Use aggressive timeouts / minimal retries so a slow or dead
+# SoundCloud request can never hang the skip pipeline.
+_SC_SOCKET_TIMEOUT = 6
+_SC_RETRIES = 1
+_SC_FRAGMENT_RETRIES = 1
+_SC_EXTRACTOR_RETRIES = 1
+
 
 def is_soundcloud_url(url: str) -> bool:
     """Check if the URL is a SoundCloud link."""
@@ -51,6 +59,10 @@ async def search_soundcloud(query: str) -> Optional[dict]:
             "extract_flat": True,
             "logger": _sc_logger,
             "default_search": "scsearch1",  # SoundCloud search, 1 result
+            "socket_timeout": _SC_SOCKET_TIMEOUT,
+            "retries": _SC_RETRIES,
+            "fragment_retries": _SC_FRAGMENT_RETRIES,
+            "extractor_retries": _SC_EXTRACTOR_RETRIES,
         }
 
         loop = asyncio.get_running_loop()
@@ -95,6 +107,10 @@ async def get_soundcloud_info(url: str) -> Optional[dict]:
             "quiet": True,
             "no_warnings": True,
             "logger": _sc_logger,
+            "socket_timeout": _SC_SOCKET_TIMEOUT,
+            "retries": _SC_RETRIES,
+            "fragment_retries": _SC_FRAGMENT_RETRIES,
+            "extractor_retries": _SC_EXTRACTOR_RETRIES,
         }
 
         loop = asyncio.get_running_loop()
@@ -133,6 +149,10 @@ async def get_soundcloud_stream_url(url: str) -> Optional[str]:
             "no_warnings": True,
             "format": "bestaudio/best",
             "logger": _sc_logger,
+            "socket_timeout": _SC_SOCKET_TIMEOUT,
+            "retries": _SC_RETRIES,
+            "fragment_retries": _SC_FRAGMENT_RETRIES,
+            "extractor_retries": _SC_EXTRACTOR_RETRIES,
         }
 
         loop = asyncio.get_running_loop()
@@ -168,6 +188,10 @@ async def download_soundcloud(url: str) -> Optional[str]:
             "quiet": True,
             "no_warnings": True,
             "logger": _sc_logger,
+            "socket_timeout": _SC_SOCKET_TIMEOUT,
+            "retries": _SC_RETRIES,
+            "fragment_retries": _SC_FRAGMENT_RETRIES,
+            "extractor_retries": _SC_EXTRACTOR_RETRIES,
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",

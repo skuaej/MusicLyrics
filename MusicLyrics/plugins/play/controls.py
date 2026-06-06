@@ -176,18 +176,19 @@ async def skip_cmd(client: Client, message: Message):
             # for the NEW track also gets swallowed, breaking auto-next.
 
             # Try the picked track AND, if it fails, keep walking down the
-            # queue trying subsequent items.  _do_play inside this chain
-            # auto-rejoins the voice chat if the assistant got dropped on
-            # a previous failure, so we never end up "stuck outside the
-            # VC with no further songs playing".
-            played = await _try_play_chain(chat_id, next_item, max_attempts=5)
+            # queue trying subsequent items.  _try_play_chain rejoins the
+            # voice chat between attempts so a single bad track can't
+            # strand the bot outside the VC.  We walk the WHOLE queue
+            # (max_attempts is just a safety ceiling); the chain stops
+            # naturally as soon as the queue is empty.
+            played = await _try_play_chain(chat_id, next_item, max_attempts=25)
 
             if played is None:
                 # Queue truly exhausted or every attempt failed.  Only
                 # now do we leave the voice chat.
                 await leave_voice_chat(chat_id)
                 reply = await message.reply_text(
-                    "❌ পরের কয়েকটা গানই চালানো যাচ্ছে না।\n"
+                    "❌ Queue শেষ — কোনো গান চালানো যায়নি।\n"
                     "Voice chat থেকে বের হচ্ছি — আবার `/play` দিন।"
                 )
                 await _add_reaction(chat_id, message.id)
@@ -510,16 +511,16 @@ async def cb_skip(client: Client, callback: CallbackQuery):
             # swallowed too, breaking auto-next / sequential playback.
 
             # Try the picked track AND, if it fails, keep walking down the
-            # queue trying subsequent items.  _do_play inside this chain
-            # auto-rejoins the voice chat if the assistant got dropped on
-            # a previous failure, so a single bad track can't strand the
-            # bot outside the VC.
-            played = await _try_play_chain(chat_id, next_item, max_attempts=5)
+            # queue trying subsequent items.  _try_play_chain rejoins the
+            # voice chat between attempts so a single bad track can't
+            # strand the bot outside the VC.  Walk the WHOLE queue —
+            # max_attempts is just a safety ceiling.
+            played = await _try_play_chain(chat_id, next_item, max_attempts=25)
 
             if played is None:
                 try:
                     err_reply = await callback.message.reply_text(
-                        "❌ পরের কয়েকটা গানই চালানো যাচ্ছে না।\n"
+                        "❌ Queue শেষ — কোনো গান চালানো যায়নি।\n"
                         "Voice chat থেকে বের হচ্ছি — আবার `/play` দিন।"
                     )
                 except Exception:

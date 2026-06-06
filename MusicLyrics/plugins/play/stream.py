@@ -696,10 +696,12 @@ async def _do_play(chat_id: int, stream):
     if chat_id in _active_chats:
         suppress_next_stream_end(chat_id)
 
-    # Per-method hard timeout.  5 s is enough for a healthy play() to
+    # Per-method hard timeout.  4 s is enough for a healthy play() to
     # respond — a slower response almost always means the call is wedged
     # and the next method/reset will work better than waiting longer.
-    PLAY_METHOD_TIMEOUT = 5.0
+    # Lowered from 5s to 4s so the whole _do_play budget shrinks,
+    # keeping skip snappy when one method hangs.
+    PLAY_METHOD_TIMEOUT = 4.0
 
     async def _reset_call_state():
         """Leave the call to clear py-tgcalls internal state.
@@ -806,12 +808,13 @@ async def _do_play(chat_id: int, stream):
 
     # If first attempt failed, assistant might not be in the group yet.
     # Try multiple methods to auto-join the group, then retry play.
+    # Timeouts kept short so we don't hang while looking for the group.
     LOG.info("Play failed for %s — trying to auto-join assistant to the group", chat_id)
     joined = False
 
     # Method 1: Direct join by chat_id
     try:
-        await asyncio.wait_for(userbot.join_chat(chat_id), timeout=8.0)
+        await asyncio.wait_for(userbot.join_chat(chat_id), timeout=5.0)
         joined = True
         LOG.info("Assistant auto-joined group %s by chat ID", chat_id)
     except Exception as e:
@@ -821,10 +824,10 @@ async def _do_play(chat_id: int, stream):
     if not joined:
         try:
             invite_link = await asyncio.wait_for(
-                bot.export_chat_invite_link(chat_id), timeout=5.0,
+                bot.export_chat_invite_link(chat_id), timeout=3.0,
             )
             if invite_link:
-                await asyncio.wait_for(userbot.join_chat(invite_link), timeout=8.0)
+                await asyncio.wait_for(userbot.join_chat(invite_link), timeout=5.0)
                 joined = True
                 LOG.info("Assistant auto-joined group %s via invite link", chat_id)
         except Exception as e2:
@@ -837,11 +840,11 @@ async def _do_play(chat_id: int, stream):
                 bot.create_chat_invite_link(
                     chat_id, name="Auto-Join", member_limit=1,
                 ),
-                timeout=5.0,
+                timeout=3.0,
             )
             if new_link and new_link.invite_link:
                 await asyncio.wait_for(
-                    userbot.join_chat(new_link.invite_link), timeout=8.0,
+                    userbot.join_chat(new_link.invite_link), timeout=5.0,
                 )
                 joined = True
                 LOG.info("Assistant auto-joined group %s via fresh invite link", chat_id)
@@ -857,7 +860,7 @@ async def _do_play(chat_id: int, stream):
         try:
             me = await userbot.get_me()
             await asyncio.wait_for(
-                bot.add_chat_members(chat_id, me.id), timeout=5.0,
+                bot.add_chat_members(chat_id, me.id), timeout=3.0,
             )
             joined = True
             LOG.info("Bot added assistant %s to group %s directly", me.id, chat_id)
@@ -1526,7 +1529,9 @@ async def leave_voice_chat(chat_id: int) -> None:
     # CRITICAL: every call MUST be wrapped with asyncio.wait_for, otherwise
     # a wedged pytgcalls connection hangs leave_call() forever and the
     # entire bot stops responding (no skip, no /play, no leave).
-    LEAVE_METHOD_TIMEOUT = 4.0
+    # 2.5s per method is enough — anything slower means the call is dead
+    # and we should fall through to the raw API leave fast.
+    LEAVE_METHOD_TIMEOUT = 2.5
     if pytgcalls is not None:
         for attempt in range(2):
             for method_name in ("leave_call", "leave_group_call"):
@@ -1772,39 +1777,90 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
     return True
 
 
+async def _ensure_assistant_in_vc(chat_id: int) -> None:
+    """Strong-arm rejoin: make absolutely sure the assistant is back in the
+    voice chat before the next ``_do_play`` attempt.
+
+    The auto-next / chain-play path can leave the assistant outside the VC
+    when ``_do_play`` did a hard reset (raw-API leave) after a wedged
+    pytgcalls.play().  Without an explicit rejoin, the next play attempt
+    has to wait for the slow auto-join chain inside ``_do_play``, and may
+    even timeout entirely — leaving the bot "stuck outside the VC and not
+    playing the next song".
+
+    This helper performs the rejoin BEFORE the next play attempt so the
+    chat-play chain stays responsive instead of stalling.
+    """
+    if pytgcalls is None or userbot is None:
+        return
+    # Drop stale bookkeeping so pre_join_vc actually runs.
+    _active_chats.discard(chat_id)
+    try:
+        await asyncio.wait_for(pre_join_vc(chat_id), timeout=8.0)
+    except asyncio.TimeoutError:
+        LOG.warning("_ensure_assistant_in_vc: pre_join_vc timed out for %s", chat_id)
+    except Exception as e:
+        LOG.debug("_ensure_assistant_in_vc: pre_join_vc failed for %s: %s", chat_id, e)
+
+
 # -- Auto-recovering chain player --------------------------------------------
 
-async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
+async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 25):
     """Try playing queue items one after another until one succeeds.
 
     Starts with *first_item* (already popped from the queue by the caller).
     On failure, pops the next item from the queue and tries that one,
-    repeating up to ``max_attempts`` total attempts.
+    repeating until either an item starts playing OR the queue is fully
+    exhausted.  ``max_attempts`` is a hard safety ceiling so a runaway
+    queue can never spin forever, but in practice the chain stops as
+    soon as the queue is empty.
 
     Crucially, every attempt routes through
-    ``_fresh_resolve_and_play → stream_audio/_video → _do_play`` and
-    ``_do_play`` already contains a full auto-rejoin path: if a prior
-    failure caused the assistant userbot to drop out of the voice chat
-    (or pytgcalls got wedged and we had to issue a raw-API leave) the
-    NEXT call rejoins the VC transparently before streaming.  This is
-    what fixes the "skip → can't play next → bot leaves VC and freezes"
-    bug: instead of bailing out and clearing the queue, we keep trying
-    subsequent songs and let _do_play rejoin for us.
+    ``_fresh_resolve_and_play → stream_audio/_video → _do_play``.  Between
+    failed attempts we ALSO call ``_ensure_assistant_in_vc`` to rejoin
+    the voice chat explicitly — without that explicit rejoin, the chain
+    occasionally leaves the bot sitting outside the VC because a prior
+    ``_do_play`` did a raw-API leave after a wedged ``pytgcalls.play()``.
+    The explicit rejoin guarantees the very next attempt streams into
+    a live VC connection instead of stalling.
+
+    Per-attempt wall-clock budget is bounded by ``ATTEMPT_TIMEOUT`` so
+    one bad track can never block the whole chain for more than a few
+    seconds.
 
     Returns the QueueItem that successfully started playing, or ``None``
-    if the queue is exhausted / all attempts failed.
+    if the queue is exhausted / all attempts failed.  Only when this
+    function returns ``None`` should the caller leave the VC — and even
+    then only because there genuinely are no more songs to try.
     """
     from MusicLyrics.plugins.play.queue import skip_queue as _sq  # avoid circular import
+
+    # Per-attempt wall-clock cap.  Lower than before (was 35s) so a single
+    # bad track can't hang the skip pipeline; 22s comfortably covers a
+    # healthy resolve+play even on slow networks.
+    ATTEMPT_TIMEOUT = 22.0
 
     item = first_item
     attempt = 0
     while item is not None and attempt < max_attempts:
         attempt += 1
         title = getattr(item, "title", "?")
+
+        # Before every attempt (including the first when the assistant may
+        # have been dropped by a prior failed play), make sure the
+        # assistant is back in the VC.  Skipping the first attempt's
+        # rejoin would be slightly faster but pre_join_vc returns
+        # instantly when nothing has to change, so cost is negligible.
+        if attempt > 1:
+            try:
+                await _ensure_assistant_in_vc(chat_id)
+            except Exception as e:
+                LOG.debug("_try_play_chain: rejoin between attempts failed: %s", e)
+
         try:
             success = await asyncio.wait_for(
                 _fresh_resolve_and_play(chat_id, item),
-                timeout=35.0,
+                timeout=ATTEMPT_TIMEOUT,
             )
         except asyncio.TimeoutError:
             LOG.warning(
@@ -1830,7 +1886,7 @@ async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
 
         LOG.info(
             "_try_play_chain: '%s' failed in %s — popping next item and retrying "
-            "(attempt %d/%d, will auto-rejoin VC if dropped)",
+            "(attempt %d/%d, will rejoin VC before next attempt)",
             title, chat_id, attempt, max_attempts,
         )
         # Pop next item from queue and try it
@@ -1990,17 +2046,18 @@ async def _on_stream_end(client, update):
                 # Try playing the next track AND, if it fails, walk further
                 # down the queue trying each subsequent item.  This is what
                 # prevents the chat from getting stuck: a single bad track
-                # no longer kicks the bot out of the voice chat.  _do_play
-                # will auto-rejoin VC if the assistant got dropped during
-                # an earlier failed attempt — see the auto-join block in
-                # _do_play around the "trying to auto-join assistant" log.
-                played = await _try_play_chain(chat_id, next_item, max_attempts=5)
+                # no longer kicks the bot out of the voice chat.
+                # _try_play_chain rejoins the VC between attempts so the
+                # assistant comes back even if an earlier attempt dropped
+                # it.  max_attempts=25 just caps runaway loops; the chain
+                # stops naturally when the queue is empty.
+                played = await _try_play_chain(chat_id, next_item, max_attempts=25)
 
                 if played is None:
                     try:
                         err_msg = await bot.send_message(
                             chat_id,
-                            "❌ **পরের কয়েকটা গানই চলানো যাচ্ছে না।**\n\n"
+                            "❌ **Queue শেষ — পরের কোনো গান চালানো যায়নি।**\n\n"
                             "Voice chat থেকে বের হচ্ছি। আবার `/play` দিন।",
                         )
                         await _add_reaction(chat_id, err_msg.id)

@@ -12,14 +12,20 @@ import aiohttp
 LOG = logging.getLogger(__name__)
 
 _API_BASE = "https://saavn.dev/api"
-# Multiple fallback endpoints for reliability
+# Reduced fallback list — fewer concurrent requests = faster overall
+# failure detection and less chance of the event loop hanging on a slow
+# unreachable endpoint.  Only well-known reliable mirrors.
 _API_FALLBACKS = [
     "https://jiosaavn-api-privatecvc2.vercel.app",
     "https://saavn.dev/api",
-    "https://jio-savaan-private.vercel.app",
-    "https://jiosaavn-api-ts.vercel.app",
 ]
 _API_FALLBACK = _API_FALLBACKS[0]
+
+# Short timeouts — JioSaavn is OUTSIDE the critical YouTube path, so we
+# want fast failure rather than long retries.  This prevents skip from
+# hanging while waiting on a slow JioSaavn mirror.
+_SAAVN_TIMEOUT = 3.0
+_SAAVN_DL_TIMEOUT = 45.0
 
 
 def is_jiosaavn_url(url: str) -> bool:
@@ -36,7 +42,7 @@ async def _search_songs_from_base(session: aiohttp.ClientSession, base: str, que
         async with session.get(
             f"{base}/api/search/songs" if "privatecvc2" in base else f"{base}/search/songs",
             params={"query": query, "limit": 1},
-            timeout=aiohttp.ClientTimeout(total=6),
+            timeout=aiohttp.ClientTimeout(total=_SAAVN_TIMEOUT),
         ) as resp:
             if resp.status != 200:
                 return None
@@ -56,7 +62,7 @@ async def _fetch_song_from_base(session: aiohttp.ClientSession, base: str, url: 
         async with session.get(
             endpoint,
             params={"link": url},
-            timeout=aiohttp.ClientTimeout(total=6),
+            timeout=aiohttp.ClientTimeout(total=_SAAVN_TIMEOUT),
         ) as resp:
             if resp.status != 200:
                 return None
@@ -180,7 +186,7 @@ async def get_jiosaavn_stream_url(url_or_id: str) -> Optional[str]:
                     )
                     async with session.get(
                         endpoint,
-                        timeout=aiohttp.ClientTimeout(total=10),
+                        timeout=aiohttp.ClientTimeout(total=_SAAVN_TIMEOUT + 2),
                     ) as resp:
                         if resp.status != 200:
                             continue
@@ -238,7 +244,7 @@ async def download_jiosaavn(url: str, *, song_info: Optional[dict] = None) -> Op
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 song["download_url"],
-                timeout=aiohttp.ClientTimeout(total=120),
+                timeout=aiohttp.ClientTimeout(total=_SAAVN_DL_TIMEOUT),
             ) as resp:
                 if resp.status != 200:
                     LOG.warning(

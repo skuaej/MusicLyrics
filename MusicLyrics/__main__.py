@@ -170,11 +170,12 @@ try:
 
     _orig_base_kill = _base_sub.BaseSubprocessTransport.kill
     _orig_base_terminate = getattr(_base_sub.BaseSubprocessTransport, 'terminate', None)
+    _orig_base_send_signal = getattr(_base_sub.BaseSubprocessTransport, 'send_signal', None)
 
     def _safe_kill(self):
         try:
             _orig_base_kill(self)
-        except ProcessLookupError:
+        except (ProcessLookupError, OSError):
             pass  # Process already exited — safe to ignore
 
     _base_sub.BaseSubprocessTransport.kill = _safe_kill
@@ -183,9 +184,17 @@ try:
         def _safe_terminate(self):
             try:
                 _orig_base_terminate(self)
-            except ProcessLookupError:
+            except (ProcessLookupError, OSError):
                 pass
         _base_sub.BaseSubprocessTransport.terminate = _safe_terminate
+
+    if _orig_base_send_signal:
+        def _safe_send_signal(self, signum):
+            try:
+                _orig_base_send_signal(self, signum)
+            except (ProcessLookupError, OSError):
+                pass
+        _base_sub.BaseSubprocessTransport.send_signal = _safe_send_signal
 
 except (ImportError, AttributeError):
     pass  # Older Python — patch not needed or not possible
@@ -762,4 +771,29 @@ async def main():
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
+
+    # Install a process-wide asyncio exception handler so unhandled
+    # exceptions in background tasks (prefetch, watchdogs, py-tgcalls
+    # callbacks, etc.) are logged rather than allowed to crash the whole
+    # bot.  Many of the recent "frequent crash" reports come from a
+    # single exception in a background coroutine going unhandled and
+    # tearing down the event loop.  This handler turns those into
+    # warnings the bot can recover from.
+    def _global_async_excepthook(loop, context):
+        msg = context.get("message", "Unhandled async exception")
+        exc = context.get("exception")
+        try:
+            if exc:
+                LOG.warning("ASYNC EXCEPTION: %s — %r", msg, exc)
+            else:
+                LOG.warning("ASYNC EXCEPTION: %s — %r", msg, context)
+        except Exception:
+            # Last-ditch print so we never lose visibility
+            print(f"ASYNC EXCEPTION: {msg}", file=sys.stderr, flush=True)
+
+    try:
+        loop.set_exception_handler(_global_async_excepthook)
+    except Exception:
+        pass
+
     loop.run_until_complete(main())
