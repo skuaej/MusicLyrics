@@ -28,9 +28,19 @@ _pool_load_attempted = False
 
 
 async def _ensure_pool_loaded(client):
-    """Load sticker packs once, on first command. Safe to call repeatedly."""
+    """Load sticker packs once, on first command. Safe to call repeatedly.
+
+    Also kicks off the background refresh loop so the pool stays warm
+    and file_references don't go stale on long-running deployments.
+    """
     global _pool_load_attempted
     if _pool_load_attempted:
+        # Even after first load, check whether a stale flag / expiry timer
+        # warrants a fresh fetch in the background.
+        try:
+            asyncio.create_task(sticker_pool.refresh_if_needed(client))
+        except Exception:
+            pass
         return
     async with _pool_load_lock:
         if _pool_load_attempted:
@@ -38,6 +48,7 @@ async def _ensure_pool_loaded(client):
         _pool_load_attempted = True
         try:
             await sticker_pool.load_all_packs(client)
+            sticker_pool.start_background_refresh(client)
         except Exception as e:
             LOG.warning("Sticker pool load failed: %s", e)
 
@@ -146,6 +157,33 @@ async def _send_reaction_safe(chat_id: int, message_id: int):
             continue
 
 
+async def _try_send_sticker(message: Message, command: str | None, chat_id: int) -> bool:
+    """Pick + send a sticker. On stale-cache errors, refresh once and retry.
+
+    Returns True if a sticker was sent successfully, False otherwise.
+    """
+    for attempt in range(2):
+        file_id = sticker_pool.pick_sticker(command=command, chat_id=chat_id)
+        if not file_id:
+            return False
+        try:
+            sticker_msg = await message.reply_sticker(sticker=file_id)
+            await _send_reaction_safe(chat_id, sticker_msg.id)
+            return True
+        except Exception as e:
+            if sticker_pool.is_stale_error(e) and attempt == 0:
+                LOG.info("Sticker file_reference stale (%s) — refreshing pool.", e)
+                sticker_pool.mark_stale()
+                try:
+                    await sticker_pool.refresh_if_needed(message._client)
+                except Exception as r:
+                    LOG.warning("Pool refresh after stale error failed: %s", r)
+                continue  # retry once with fresh file_ids
+            LOG.debug("reply_sticker failed (%s) — falling back to emoji.", e)
+            return False
+    return False
+
+
 async def _send_big_reaction_and_sticker(chat_id: int, message: Message, command: str | None = None):
     """Send a sticker / big emoji / dice as reply (with cooldown).
 
@@ -166,15 +204,10 @@ async def _send_big_reaction_and_sticker(chat_id: int, message: Message, command
 
     # Prefer real stickers when available
     if pool_ready and roll < 0.65:
-        file_id = sticker_pool.pick_sticker(command=command, chat_id=chat_id)
-        if file_id:
-            try:
-                sticker_msg = await message.reply_sticker(sticker=file_id)
-                await _send_reaction_safe(chat_id, sticker_msg.id)
-                return
-            except Exception as e:
-                LOG.debug("reply_sticker failed (%s) — falling back to emoji.", e)
-                # fall through to emoji/dice path
+        sent_ok = await _try_send_sticker(message, command, chat_id)
+        if sent_ok:
+            return
+        # If sticker failed (after retry attempt), fall through to emoji/dice
 
     # Big emoji grid
     if roll < 0.90 or not pool_ready and roll < 0.55:

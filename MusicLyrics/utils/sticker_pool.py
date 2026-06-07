@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections import defaultdict
 from typing import Optional
 
@@ -121,6 +122,47 @@ _all_ids: list[str] = []
 _loaded: bool = False
 _last_sent: dict[int, str] = {}  # chat_id -> last sent file_id (avoid repeats)
 
+# Refresh state
+_REFRESH_INTERVAL_SEC = 6 * 60 * 60   # auto-refresh every 6 hours
+_REFRESH_MIN_GAP_SEC = 60             # never refresh more often than this
+_last_refresh_ts: float = 0.0
+_refresh_lock: Optional[asyncio.Lock] = None  # lazy-created on first use
+_refresh_task: Optional[asyncio.Task] = None
+_stale: bool = False                  # flipped on by mark_stale() after send error
+
+
+def _get_lock() -> asyncio.Lock:
+    """Lazily create the refresh lock on the currently-running event loop."""
+    global _refresh_lock
+    if _refresh_lock is None:
+        _refresh_lock = asyncio.Lock()
+    return _refresh_lock
+
+
+# Errors that indicate the cached file_ids / file_references are stale.
+# Used by reply_sticker callers to trigger a pool refresh.
+STALE_ERROR_KEYWORDS = (
+    "FILE_REFERENCE_EXPIRED",
+    "FILE_REFERENCE_INVALID",
+    "FILE_REFERENCE_EMPTY",
+    "FILE_ID_INVALID",
+    "STICKER_INVALID",
+    "MEDIA_INVALID",
+)
+
+
+def is_stale_error(exc: BaseException) -> bool:
+    """Return True if the exception text matches a file-reference-stale error."""
+    text = f"{type(exc).__name__}: {exc}".upper()
+    return any(k in text for k in STALE_ERROR_KEYWORDS)
+
+
+def mark_stale() -> None:
+    """Mark the pool as stale so the next send attempt triggers a refresh."""
+    global _stale
+    _stale = True
+
+
 
 def _bucket(emoji: Optional[str]) -> str:
     if not emoji:
@@ -132,11 +174,65 @@ def _bucket(emoji: Optional[str]) -> str:
     return _MOOD_MAP.get(emoji[0], "neutral")
 
 
-async def _fetch_pack(client, short_name: str) -> int:
-    """Fetch a single sticker pack, populate the cache. Returns count added."""
+async def load_all_packs(client, packs: Optional[list[str]] = None) -> int:
+    """Load every configured sticker pack into the in-memory pool.
+
+    Safe to call multiple times — subsequent calls reload from scratch.
+    Returns total sticker count loaded.
+    """
+    global _loaded, _last_refresh_ts, _stale
+
+    pack_list = packs if packs is not None else STICKER_PACK_NAMES
+
+    # Build into a fresh staging area so the live pool stays usable
+    # if the reload fails halfway (e.g., network blip).
+    tasks = [_fetch_pack_into(client, name) for name in pack_list]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    fresh_pool: dict[str, list[str]] = defaultdict(list)
+    fresh_all: list[str] = []
+    total = 0
+    for r in results:
+        if isinstance(r, Exception) or r is None:
+            continue
+        added, per_pack = r
+        total += added
+        for mood, ids in per_pack.items():
+            fresh_pool[mood].extend(ids)
+            fresh_all.extend(ids)
+
+    if total == 0 and _all_ids:
+        # Reload failed completely but we still have a previous pool — keep it
+        LOG.warning("Sticker pool reload returned 0 stickers; keeping previous cache (%d).", len(_all_ids))
+        _last_refresh_ts = time.time()  # avoid hammering on repeated failures
+        return len(_all_ids)
+
+    _pool.clear()
+    _all_ids.clear()
+    for k, v in fresh_pool.items():
+        _pool[k].extend(v)
+    _all_ids.extend(fresh_all)
+    _loaded = total > 0
+    _last_refresh_ts = time.time()
+    _stale = False
+
+    mood_summary = ", ".join(f"{m}:{len(v)}" for m, v in sorted(_pool.items()))
+    LOG.info(
+        "Sticker pool ready — %d total stickers from %d pack(s). Moods: %s",
+        total, len(pack_list), mood_summary or "none",
+    )
+    return total
+
+
+async def _fetch_pack_into(client, short_name: str):
+    """Fetch a single pack and return (count, {mood: [file_id, ...]}).
+
+    Separate from the public _fetch_pack so the live pool isn't mutated
+    during a reload — the caller swaps in the staged data only on success.
+    """
     from pyrogram.raw.functions.messages import GetStickerSet
     from pyrogram.raw.types import InputStickerSetShortName
-    from pyrogram.file_id import FileId, FileType, ThumbnailSource
+    from pyrogram.file_id import FileId, FileType
 
     try:
         result = await client.invoke(
@@ -147,12 +243,11 @@ async def _fetch_pack(client, short_name: str) -> int:
         )
     except Exception as e:
         LOG.warning("Sticker pack '%s' load failed: %s", short_name, e)
-        return 0
+        return 0, {}
 
     documents = getattr(result, "documents", None) or []
     packs = getattr(result, "packs", None) or []
 
-    # Build doc_id -> emoji map from pack metadata
     doc_emoji: dict[int, str] = {}
     for p in packs:
         emoji = getattr(p, "emoticon", None)
@@ -160,10 +255,10 @@ async def _fetch_pack(client, short_name: str) -> int:
             if doc_id not in doc_emoji and emoji:
                 doc_emoji[doc_id] = emoji
 
+    per_pack: dict[str, list[str]] = defaultdict(list)
     added = 0
     for doc in documents:
         try:
-            # Build a Pyrogram-compatible file_id string from the raw Document
             file_id_obj = FileId(
                 file_type=FileType.STICKER,
                 dc_id=doc.dc_id,
@@ -175,40 +270,66 @@ async def _fetch_pack(client, short_name: str) -> int:
         except Exception as e:
             LOG.debug("Could not encode sticker file_id in '%s': %s", short_name, e)
             continue
-
-        emoji = doc_emoji.get(doc.id)
-        mood = _bucket(emoji)
-        _pool[mood].append(file_id_str)
-        _all_ids.append(file_id_str)
+        mood = _bucket(doc_emoji.get(doc.id))
+        per_pack[mood].append(file_id_str)
         added += 1
 
     LOG.info("Sticker pack '%s' loaded: %d stickers.", short_name, added)
-    return added
+    return added, per_pack
 
 
-async def load_all_packs(client, packs: Optional[list[str]] = None) -> int:
-    """Load every configured sticker pack into the in-memory pool.
+async def refresh_if_needed(client, force: bool = False) -> bool:
+    """Refresh the pool if it's stale or older than the interval.
 
-    Safe to call multiple times — subsequent calls reload from scratch.
-    Returns total sticker count loaded.
+    Returns True if a refresh actually ran (success or no-op-keep), False
+    if the call was skipped (lock contention or rate-limit window).
     """
-    global _loaded
-    _pool.clear()
-    _all_ids.clear()
+    now = time.time()
+    if not force:
+        age = now - _last_refresh_ts
+        if not _stale and age < _REFRESH_INTERVAL_SEC:
+            return False
+        if age < _REFRESH_MIN_GAP_SEC:
+            return False  # rate-limit: avoid refresh storms
 
-    pack_list = packs if packs is not None else STICKER_PACK_NAMES
-    tasks = [_fetch_pack(client, name) for name in pack_list]
-    counts = await asyncio.gather(*tasks, return_exceptions=True)
+    lock = _get_lock()
+    if lock.locked():
+        return False  # another refresh already in flight
+    async with lock:
+        # Re-check after acquiring lock
+        if not force and not _stale and (time.time() - _last_refresh_ts) < _REFRESH_INTERVAL_SEC:
+            return False
+        try:
+            await load_all_packs(client)
+        except Exception as e:
+            LOG.warning("Sticker pool refresh failed: %s", e)
+    return True
 
-    total = sum(c for c in counts if isinstance(c, int))
-    _loaded = total > 0
 
-    mood_summary = ", ".join(f"{m}:{len(v)}" for m, v in sorted(_pool.items()))
-    LOG.info(
-        "Sticker pool ready — %d total stickers from %d pack(s). Moods: %s",
-        total, len(pack_list), mood_summary or "none",
-    )
-    return total
+async def _background_refresh_loop(client):
+    """Periodic background refresh — fires every REFRESH_INTERVAL_SEC."""
+    while True:
+        try:
+            await asyncio.sleep(_REFRESH_INTERVAL_SEC)
+            await refresh_if_needed(client, force=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            LOG.warning("Background sticker refresh tick failed: %s", e)
+
+
+def start_background_refresh(client) -> None:
+    """Start the periodic refresh task (idempotent — safe to call repeatedly)."""
+    global _refresh_task
+    if _refresh_task is not None and not _refresh_task.done():
+        return
+    try:
+        loop = asyncio.get_event_loop()
+        _refresh_task = loop.create_task(_background_refresh_loop(client))
+        LOG.info("Sticker pool background refresh started (interval=%ds).",
+                 _REFRESH_INTERVAL_SEC)
+    except Exception as e:
+        LOG.warning("Could not start sticker background refresh: %s", e)
 
 
 def pool_size() -> int:
