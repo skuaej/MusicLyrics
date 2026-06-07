@@ -18,8 +18,29 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from MusicLyrics.bot import bot
+from MusicLyrics.utils import sticker_pool
 
 LOG = logging.getLogger(__name__)
+
+# Lazy-load guard: load the configured sticker packs on first command.
+_pool_load_lock = asyncio.Lock()
+_pool_load_attempted = False
+
+
+async def _ensure_pool_loaded(client):
+    """Load sticker packs once, on first command. Safe to call repeatedly."""
+    global _pool_load_attempted
+    if _pool_load_attempted:
+        return
+    async with _pool_load_lock:
+        if _pool_load_attempted:
+            return
+        _pool_load_attempted = True
+        try:
+            await sticker_pool.load_all_packs(client)
+        except Exception as e:
+            LOG.warning("Sticker pool load failed: %s", e)
+
 
 # ── Telegram-supported reaction emojis (large pool) ────────────────────────
 REACTION_POOL = [
@@ -125,32 +146,56 @@ async def _send_reaction_safe(chat_id: int, message_id: int):
             continue
 
 
-async def _send_big_reaction_and_sticker(chat_id: int, message: Message):
-    """Send big emoji grid + sticker/dice as reply (with cooldown)."""
+async def _send_big_reaction_and_sticker(chat_id: int, message: Message, command: str | None = None):
+    """Send a sticker / big emoji / dice as reply (with cooldown).
+
+    Mix (when sticker pool is loaded):
+      * 65% real sticker from the curated pool (mood-matched to command)
+      * 25% big emoji grid
+      * 10% dice
+    If the pool is empty, falls back to the original 55/45 emoji/dice mix.
+    """
     now = time.time()
     if chat_id in _last_react_time:
         if now - _last_react_time[chat_id] < _REACT_COOLDOWN:
             return
     _last_react_time[chat_id] = now
 
-    # 55% big emoji, 45% dice/sticker
-    if random.random() < 0.55:
+    roll = random.random()
+    pool_ready = sticker_pool.is_ready()
+
+    # Prefer real stickers when available
+    if pool_ready and roll < 0.65:
+        file_id = sticker_pool.pick_sticker(command=command, chat_id=chat_id)
+        if file_id:
+            try:
+                sticker_msg = await message.reply_sticker(sticker=file_id)
+                await _send_reaction_safe(chat_id, sticker_msg.id)
+                return
+            except Exception as e:
+                LOG.debug("reply_sticker failed (%s) — falling back to emoji.", e)
+                # fall through to emoji/dice path
+
+    # Big emoji grid
+    if roll < 0.90 or not pool_ready and roll < 0.55:
         emoji_grid = random.choice(BIG_EMOJI_SETS)
         try:
             big_msg = await message.reply_text(emoji_grid)
             await _send_reaction_safe(chat_id, big_msg.id)
+            return
         except Exception:
             pass
-    else:
-        dice_emoji = random.choice(DICE_EMOJIS)
+
+    # Dice fallback
+    dice_emoji = random.choice(DICE_EMOJIS)
+    try:
+        dice_msg = await message.reply_dice(emoji=dice_emoji)
+        await _send_reaction_safe(chat_id, dice_msg.id)
+    except Exception:
         try:
-            dice_msg = await message.reply_dice(emoji=dice_emoji)
-            await _send_reaction_safe(chat_id, dice_msg.id)
+            await message.reply_text(random.choice(BIG_EMOJI_SETS))
         except Exception:
-            try:
-                await message.reply_text(random.choice(BIG_EMOJI_SETS))
-            except Exception:
-                pass
+            pass
 
 
 # ── Watcher handler at group=97 (runs AFTER all real handlers) ──────────────
@@ -189,6 +234,15 @@ async def _global_command_reactor(client: Client, message: Message):
 
     chat_id = message.chat.id
 
+    # First-time lazy load of the configured sticker packs
+    await _ensure_pool_loaded(client)
+
+    # Extract the command word (without leading slash, without @username)
+    cmd_text = (message.text or "").lstrip().split()
+    cmd_word = None
+    if cmd_text and cmd_text[0].startswith("/"):
+        cmd_word = cmd_text[0][1:].split("@", 1)[0].lower()
+
     # Add reaction to the original command message
     try:
         await _send_reaction_safe(chat_id, message.id)
@@ -197,6 +251,6 @@ async def _global_command_reactor(client: Client, message: Message):
 
     # Send big emoji / sticker reply
     try:
-        await _send_big_reaction_and_sticker(chat_id, message)
+        await _send_big_reaction_and_sticker(chat_id, message, command=cmd_word)
     except Exception:
         pass
