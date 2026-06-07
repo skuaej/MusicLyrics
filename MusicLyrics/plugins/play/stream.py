@@ -1958,19 +1958,16 @@ async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
         if attempt > 1:
             await asyncio.sleep(0.5)
 
-        # Before every attempt (including the first when the assistant may
-        # have been dropped by a prior failed play), make sure the
-        # assistant is back in the VC.  The first-attempt rejoin runs only
-        # when the chat is NOT currently active — that way a healthy live
-        # /skip stays instant, while auto-next after a wedged play (which
-        # already cleared _active_chats) still gets the strong-arm rejoin
-        # before its very first new-track play attempt.
-        needs_rejoin = (attempt > 1) or (chat_id not in _active_chats)
-        if needs_rejoin:
+        # Between FAILED attempts (attempt 2+), strong-arm the rejoin so
+        # the next _do_play starts from a clean call state.  The first
+        # attempt skips this for SPEED — healthy auto-next / skip needs
+        # to be near-instant, and _do_play already handles its own
+        # reset+rejoin internally if the play() call wedges.
+        if attempt > 1:
             try:
                 await _ensure_assistant_in_vc(chat_id)
             except Exception as e:
-                LOG.debug("_try_play_chain: rejoin before attempt failed: %s", e)
+                LOG.debug("_try_play_chain: rejoin between attempts failed: %s", e)
 
         try:
             success = await asyncio.wait_for(
