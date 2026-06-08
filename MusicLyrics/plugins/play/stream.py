@@ -58,6 +58,11 @@ LOG = logging.getLogger(__name__)
 
 # Track active chats so we know whether to join or change stream
 _active_chats: set[int] = set()
+# Lock guarding all mutations of _active_chats / _progress_state.
+# Without this, a tick of the central progress loop iterating over the dict
+# can race with stream_audio / _on_stream_end and crash with
+# "RuntimeError: Set/dictionary changed size during iteration".
+_STATE_LOCK = asyncio.Lock()
 
 # Track "Now Playing" messages for each chat so we can delete them when track ends
 _now_playing_messages: dict[int, list] = {}
@@ -90,6 +95,30 @@ _play_locks: dict[int, asyncio.Lock] = {}
 # The next _do_play invocation will wait briefly for these to finish before
 # issuing a new native play() on the same chat.
 _orphan_play_tasks: dict[int, asyncio.Task] = {}
+# Hard cap so a long-running deployment over thousands of groups cannot
+# leak unbounded native-state references into Python and OOM Railway.
+_ORPHAN_TASKS_HARD_CAP = 2000
+
+
+def _reap_orphan_tasks() -> None:
+    """Drop completed entries from _orphan_play_tasks; FIFO-evict if oversized."""
+    try:
+        done_keys = [k for k, t in _orphan_play_tasks.items() if t.done()]
+        for k in done_keys:
+            _orphan_play_tasks.pop(k, None)
+        # If we are STILL over the cap (e.g., many genuinely stuck tasks),
+        # cancel the oldest ones so memory cannot grow without bound.
+        if len(_orphan_play_tasks) > _ORPHAN_TASKS_HARD_CAP:
+            excess = len(_orphan_play_tasks) - _ORPHAN_TASKS_HARD_CAP
+            for k in list(_orphan_play_tasks.keys())[:excess]:
+                t = _orphan_play_tasks.pop(k, None)
+                if t is not None and not t.done():
+                    try:
+                        t.cancel()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
 
 def _get_play_lock(chat_id: int) -> asyncio.Lock:
@@ -1095,48 +1124,65 @@ def _build_progress_text(current, elapsed: int, total: int) -> str:
 
 async def _central_progress_loop():
     while True:
-        await asyncio.sleep(PROGRESS_INTERVAL_SEC)
-        chats = list(_progress_state.keys())
-        edited = 0
-        for chat_id in chats:
-            if edited >= PROGRESS_PER_TICK_CAP:
-                break
-            state = _progress_state.get(chat_id)
-            if not state:
-                continue
-            try:
-                elapsed = int(time.time() - state["start"])
-                total = state["duration"]
-                if total > 0 and elapsed > total + 30:
-                    _progress_state.pop(chat_id, None)
+        try:
+            await asyncio.sleep(PROGRESS_INTERVAL_SEC)
+            # Snapshot keys under the state lock so we never iterate a dict
+            # that is being mutated concurrently (RuntimeError otherwise).
+            async with _STATE_LOCK:
+                chats = list(_progress_state.keys())
+            # Opportunistic reaper — keeps memory bounded on long uptimes.
+            _reap_orphan_tasks()
+            edited = 0
+            for chat_id in chats:
+                if edited >= PROGRESS_PER_TICK_CAP:
+                    break
+                state = _progress_state.get(chat_id)
+                if not state:
                     continue
-                msgs = _now_playing_messages.get(chat_id) or []
-                if not msgs:
-                    continue
-                if time.time() - state.get("last_update", 0) < 25:
-                    continue
-                state["last_update"] = time.time()
-                current = await get_current(chat_id)
-                if not current:
-                    continue
-                text = _build_progress_text(current, elapsed, total)
-                last_msg = msgs[-1]
                 try:
-                    if hasattr(last_msg, "photo") and last_msg.photo:
-                        await last_msg.edit_caption(
-                            caption=text, reply_markup=_control_keyboard(),
-                        )
-                    else:
-                        await last_msg.edit_text(
-                            text, reply_markup=_control_keyboard(),
-                        )
-                    edited += 1
-                except Exception as e:
-                    LOG.warning("Progress edit failed for %s: %s", chat_id, e)
-                    if "MESSAGE_ID_INVALID" in str(e) or "message not found" in str(e).lower():
+                    elapsed = int(time.time() - state["start"])
+                    total = state["duration"]
+                    if total > 0 and elapsed > total + 30:
                         _progress_state.pop(chat_id, None)
-            except Exception as e:
-                LOG.debug("central progress tick failed for %s: %s", chat_id, e)
+                        continue
+                    msgs = _now_playing_messages.get(chat_id) or []
+                    if not msgs:
+                        continue
+                    if time.time() - state.get("last_update", 0) < 25:
+                        continue
+                    state["last_update"] = time.time()
+                    current = await get_current(chat_id)
+                    if not current:
+                        continue
+                    text = _build_progress_text(current, elapsed, total)
+                    last_msg = msgs[-1]
+                    try:
+                        if hasattr(last_msg, "photo") and last_msg.photo:
+                            await last_msg.edit_caption(
+                                caption=text, reply_markup=_control_keyboard(),
+                            )
+                        else:
+                            await last_msg.edit_text(
+                                text, reply_markup=_control_keyboard(),
+                            )
+                        edited += 1
+                    except Exception as e:
+                        LOG.warning("Progress edit failed for %s: %s", chat_id, e)
+                        if "MESSAGE_ID_INVALID" in str(e) or "message not found" in str(e).lower():
+                            _progress_state.pop(chat_id, None)
+                except Exception as e:
+                    LOG.debug("central progress tick failed for %s: %s", chat_id, e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # NEVER let the central progress loop die — without it, all groups
+            # silently lose their "now playing" updates and users assume the
+            # bot has crashed.
+            LOG.exception("central progress loop crashed; restarting in 5s: %s", e)
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                raise
 
 
 async def _stream_health_watchdog(chat_id: int):
@@ -1173,13 +1219,14 @@ async def _stream_health_watchdog(chat_id: int):
 async def _start_progress_timer(chat_id: int, duration: int):
     """Register chat for centralized progress updates."""
     global _central_progress_task
-    _progress_state[chat_id] = {
-        "start": time.time(),
-        "duration": duration,
-        "last_update": 0.0,
-    }
-    _play_start_times[chat_id] = time.time()
-    _play_durations[chat_id] = duration
+    async with _STATE_LOCK:
+        _progress_state[chat_id] = {
+            "start": time.time(),
+            "duration": duration,
+            "last_update": 0.0,
+        }
+        _play_start_times[chat_id] = time.time()
+        _play_durations[chat_id] = duration
     if _central_progress_task is None or _central_progress_task.done():
         _central_progress_task = asyncio.create_task(_central_progress_loop())
     try:
@@ -1189,7 +1236,11 @@ async def _start_progress_timer(chat_id: int, duration: int):
 
 
 def _stop_progress_timer(chat_id: int):
-    """Unregister chat from progress updates."""
+    """Unregister chat from progress updates.
+
+    Synchronous because callers (incl. error paths) often run in non-await
+    contexts; dict.pop is atomic so this is safe without the state lock.
+    """
     _progress_state.pop(chat_id, None)
     _play_start_times.pop(chat_id, None)
     _play_durations.pop(chat_id, None)
@@ -1206,11 +1257,24 @@ def _cleanup_chat_state(chat_id: int) -> None:
     _END_HANDLING.pop(chat_id, None)
     _suppress_stream_end.pop(chat_id, None)
     _auto_next_in_progress.discard(chat_id)
-    _orphan_play_tasks.pop(chat_id, None)
+    # Cancel any orphan play task we still hold for this chat so it does
+    # not linger forever consuming pytgcalls native state.
+    t = _orphan_play_tasks.pop(chat_id, None)
+    if t is not None and not t.done():
+        try:
+            t.cancel()
+        except Exception:
+            pass
     _progress_state.pop(chat_id, None)
     try:
         from MusicLyrics.utils.safe_send import clear_chat_state
         clear_chat_state(chat_id)
+    except Exception:
+        pass
+    # Drop prefetch state (cancels any in-flight prefetch + drains it).
+    try:
+        from MusicLyrics.plugins.play.prefetch import clear_prefetch_state
+        clear_prefetch_state(chat_id)
     except Exception:
         pass
 
@@ -2248,6 +2312,17 @@ async def _on_stream_end(client, update):
                     chat_id,
                 )
                 return
+
+            # ── Phase A: state mutations under the skip lock (FAST) ─────────
+            # Anything slow (downloads, network) MUST happen OUTSIDE the lock.
+            # Holding the skip lock during _try_play_chain (which can run for
+            # 15+ s of yt-dlp / JioSaavn / SoundCloud network I/O) starves
+            # user /skip commands and causes a cascade of acquire_skip_lock
+            # timeouts that crash the bot at scale.
+            next_item = None
+            queue_was_empty_before = False
+            finished_title = "Unknown"
+            finished_requester = ""
             try:
                 # Re-check if chat is still active (may have been stopped while waiting for lock)
                 if chat_id not in _active_chats:
@@ -2292,92 +2367,95 @@ async def _on_stream_end(client, update):
                         pass
 
                 if next_item is None:
-                    # Queue is empty — send "song ended" message with add-to-group button
-                    try:
-                        t = _get_current_theme()
-                        finish_msg = await bot.send_message(
-                            chat_id,
-                            f"▸ **ꜱᴏɴɢ ᴇɴᴅᴇᴅ** ✅\n\n"
-                            f"{t['title_icon']} **ꜱʜᴇꜱʜ ɢᴀᴀɴ:** {finished_title}\n"
-                            f"👤 **ꜱʜᴜɴɪʏᴇᴄʜɪʟᴇɴ:** {finished_requester}\n\n"
-                            f"🔄 আবার গান শুনতে `/play` কমান্ড দিন।\n\n"
-                            f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
-                            reply_markup=_song_ended_keyboard(),
-                        )
-                        await _add_reaction(chat_id, finish_msg.id)
-                    except Exception:
-                        pass
-                    # Now leave the voice chat
-                    await leave_voice_chat(chat_id)
-                    LOG.info("Queue empty, left voice chat in %s", chat_id)
-                    return
-
-                # Play next track (INSIDE lock to prevent race with manual skip)
-                # Remove from _active_chats so _do_play does NOT add a false
-                # suppress_next_stream_end (the old stream already ended naturally,
-                # there is no old-stream event to suppress).
-                _active_chats.discard(chat_id)
-
+                    queue_was_empty_before = True
+                else:
+                    # Remove from _active_chats so _do_play does NOT add a false
+                    # suppress_next_stream_end (the old stream already ended naturally).
+                    _active_chats.discard(chat_id)
+            finally:
+                # Release the skip lock NOW — before any slow network I/O.
                 try:
-                    # 5 attempts is plenty — 25 was overkill and exhausted the
-                    # extractor pool (each attempt fans out to 4-5 platforms).
-                    played = await _try_play_chain(chat_id, next_item, max_attempts=5)
-
-                    if played is None:
-                        try:
-                            err_msg = await bot.send_message(
-                                chat_id,
-                                "❌ **Queue শেষ — পরের কোনো গান চালানো যায়নি।**\n\n"
-                                "Voice chat থেকে বের হচ্ছি। আবার `/play` দিন।",
-                            )
-                            await _add_reaction(chat_id, err_msg.id)
-                        except Exception:
-                            pass
-                        await leave_voice_chat(chat_id)
-                        return
-
-                    # The item that actually started playing may not be the
-                    # first one we tried — use the returned item for UI.
-                    next_item = played
-
-                    dur = format_duration(next_item.duration)
-                    color = _get_next_color()
-
-                    # Start progress timer for the new track
-                    await _start_progress_timer(chat_id, next_item.duration)
-
-                    t = _get_current_theme()
-                    np_msg = await bot.send_message(
-                        chat_id,
-                        f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
-                        f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{next_item.title}]({next_item.url})\n"
-                        f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
-                        f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {next_item.requester}"
-                        f"\n\n🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
-                        reply_markup=_control_keyboard(color),
-                    )
-                    # Add reaction to the now playing message
-                    await _add_reaction(chat_id, np_msg.id)
-                    # Track this message (thread-safe)
-                    await _add_now_playing(chat_id, np_msg)
+                    lock.release()
                 except Exception:
-                    LOG.exception("Failed to play next in queue for %s", chat_id)
-                    # Send error message before leaving
+                    pass
+
+            # ── Phase B: slow work OUTSIDE the skip lock ────────────────────
+            if queue_was_empty_before:
+                # Queue is empty — send "song ended" message with add-to-group button
+                try:
+                    t = _get_current_theme()
+                    finish_msg = await bot.send_message(
+                        chat_id,
+                        f"▸ **ꜱᴏɴɢ ᴇɴᴅᴇᴅ** ✅\n\n"
+                        f"{t['title_icon']} **ꜱʜᴇꜱʜ ɢᴀᴀɴ:** {finished_title}\n"
+                        f"👤 **ꜱʜᴜɴɪʏᴇᴄʜɪʟᴇɴ:** {finished_requester}\n\n"
+                        f"🔄 আবার গান শুনতে `/play` কমান্ড দিন।\n\n"
+                        f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
+                        reply_markup=_song_ended_keyboard(),
+                    )
+                    await _add_reaction(chat_id, finish_msg.id)
+                except Exception:
+                    pass
+                # Now leave the voice chat
+                await leave_voice_chat(chat_id)
+                LOG.info("Queue empty, left voice chat in %s", chat_id)
+                return
+
+            try:
+                # 5 attempts is plenty — 25 was overkill and exhausted the
+                # extractor pool (each attempt fans out to 4-5 platforms).
+                played = await _try_play_chain(chat_id, next_item, max_attempts=5)
+
+                if played is None:
                     try:
                         err_msg = await bot.send_message(
                             chat_id,
-                            f"❌ **পরের গানটি চলানো যায়নি:** {next_item.title}\n\n"
-                            "Voice chat থেকে বের হচ্ছে। আবার `/play` দিন।",
+                            "❌ **Queue শেষ — পরের কোনো গান চালানো যায়নি।**\n\n"
+                            "Voice chat থেকে বের হচ্ছি। আবার `/play` দিন।",
                         )
                         await _add_reaction(chat_id, err_msg.id)
                     except Exception:
                         pass
                     await leave_voice_chat(chat_id)
-            finally:
+                    return
+
+                # The item that actually started playing may not be the
+                # first one we tried — use the returned item for UI.
+                next_item = played
+
+                dur = format_duration(next_item.duration)
+                color = _get_next_color()
+
+                # Start progress timer for the new track
+                await _start_progress_timer(chat_id, next_item.duration)
+
+                t = _get_current_theme()
+                np_msg = await bot.send_message(
+                    chat_id,
+                    f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
+                    f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{next_item.title}]({next_item.url})\n"
+                    f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
+                    f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {next_item.requester}"
+                    f"\n\n🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
+                    reply_markup=_control_keyboard(color),
+                )
+                # Add reaction to the now playing message
+                await _add_reaction(chat_id, np_msg.id)
+                # Track this message (thread-safe)
+                await _add_now_playing(chat_id, np_msg)
+            except Exception:
+                LOG.exception("Failed to play next in queue for %s", chat_id)
+                # Send error message before leaving
                 try:
-                    lock.release()
+                    err_msg = await bot.send_message(
+                        chat_id,
+                        f"❌ **পরের গানটি চলানো যায়নি:** {next_item.title}\n\n"
+                        "Voice chat থেকে বের হচ্ছে। আবার `/play` দিন।",
+                    )
+                    await _add_reaction(chat_id, err_msg.id)
                 except Exception:
                     pass
+                await leave_voice_chat(chat_id)
         finally:
             _auto_next_in_progress.discard(chat_id)
     finally:
