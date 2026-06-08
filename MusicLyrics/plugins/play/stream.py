@@ -11,7 +11,6 @@ import asyncio
 import logging
 import os
 import time
-from collections import defaultdict
 from typing import Optional
 
 from pyrogram.types import (
@@ -21,7 +20,14 @@ from pyrogram.types import (
 
 from config import Config
 from MusicLyrics.bot import bot
-from MusicLyrics.userbot import pytgcalls, userbot
+from MusicLyrics.userbot import get_assistant, pytgcalls, userbot
+
+
+def _assistant_for_chat(chat_id: int):
+    ub, ptc = get_assistant(chat_id)
+    if ub is None or ptc is None:
+        return userbot, pytgcalls
+    return ub, ptc
 
 from MusicLyrics.plugins.play.queue import (
     get_current,
@@ -62,8 +68,12 @@ _play_start_times: dict[int, float] = {}
 # Track current track durations for progress display
 _play_durations: dict[int, int] = {}
 
-# Active progress update tasks per chat
-_progress_tasks: dict[int, asyncio.Task] = {}
+# Centralized progress update state for all active chats.
+_progress_state: dict[int, dict] = {}
+_central_progress_task: Optional[asyncio.Task] = None
+
+PROGRESS_INTERVAL_SEC = 30  # Lower API rate by updating less often.
+PROGRESS_PER_TICK_CAP = 50  # Max edits per tick to avoid burst FLOOD.
 
 # Track which platform last succeeded for each chat — prioritize it next time
 _last_successful_platform: dict[int, str] = {}
@@ -75,12 +85,20 @@ _skip_locks: dict[int, asyncio.Lock] = {}
 # same chat.  Concurrent calls into pytgcalls' native C extension can
 # segfault and kill the entire Python process — the most common cause of
 # the bot vanishing mid-skip / mid-auto-next.
-_play_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_play_locks: dict[int, asyncio.Lock] = {}
+# Background play tasks that we gave up waiting for but didn't cancel.
+# The next _do_play invocation will wait briefly for these to finish before
+# issuing a new native play() on the same chat.
+_orphan_play_tasks: dict[int, asyncio.Task] = {}
 
 
 def _get_play_lock(chat_id: int) -> asyncio.Lock:
     """Return the per-chat play lock (created on first access)."""
-    return _play_locks[chat_id]
+    lock = _play_locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _play_locks[chat_id] = lock
+    return lock
 
 
 # Global lock for _now_playing_messages dict mutations.  Without this,
@@ -216,7 +234,8 @@ async def pre_join_vc(chat_id: int) -> None:
     This collapses the worst-case wait from ~25 s (sequential) down to
     the slowest single method (~5 s).
     """
-    if pytgcalls is None or userbot is None:
+    ub, ptc = _assistant_for_chat(chat_id)
+    if ptc is None or ub is None:
         return
 
     # Already active? Nothing to do
@@ -226,7 +245,7 @@ async def pre_join_vc(chat_id: int) -> None:
     try:
         # Check if already in a call
         try:
-            calls = pytgcalls.calls
+            calls = ptc.calls
             if asyncio.iscoroutine(calls):
                 calls = await calls
             if chat_id in calls:
@@ -237,7 +256,7 @@ async def pre_join_vc(chat_id: int) -> None:
 
         # Check if assistant is already a member of the group
         try:
-            me = await asyncio.wait_for(userbot.get_me(), timeout=3.0)
+            me = await asyncio.wait_for(ub.get_me(), timeout=3.0)
             try:
                 member = await asyncio.wait_for(
                     bot.get_chat_member(chat_id, me.id), timeout=2.5,
@@ -253,7 +272,7 @@ async def pre_join_vc(chat_id: int) -> None:
 
         # PARALLEL JOIN — race all methods, first success wins.
         async def _m_direct():
-            await asyncio.wait_for(userbot.join_chat(chat_id), timeout=5.0)
+            await asyncio.wait_for(ub.join_chat(chat_id), timeout=5.0)
             return "direct"
 
         async def _m_invite():
@@ -262,7 +281,7 @@ async def pre_join_vc(chat_id: int) -> None:
             )
             if not invite_link:
                 raise RuntimeError("no invite link")
-            await asyncio.wait_for(userbot.join_chat(invite_link), timeout=5.0)
+            await asyncio.wait_for(ub.join_chat(invite_link), timeout=5.0)
             return "invite"
 
         async def _m_fresh_invite():
@@ -276,7 +295,7 @@ async def pre_join_vc(chat_id: int) -> None:
                 raise RuntimeError("no fresh invite")
             link = new_link.invite_link
             try:
-                await asyncio.wait_for(userbot.join_chat(link), timeout=5.0)
+                await asyncio.wait_for(ub.join_chat(link), timeout=5.0)
                 return "fresh_invite"
             finally:
                 try:
@@ -288,7 +307,7 @@ async def pre_join_vc(chat_id: int) -> None:
 
         async def _m_add():
             if me is None:
-                _me = await asyncio.wait_for(userbot.get_me(), timeout=2.5)
+                _me = await asyncio.wait_for(ub.get_me(), timeout=2.5)
                 uid = _me.id
             else:
                 uid = me.id
@@ -442,6 +461,7 @@ async def _add_reaction(chat_id: int, message_id: int) -> None:
         "\U0001f480",  # 💀
     ]
     emoji = _rand.choice(_react_pool)
+    await asyncio.sleep(0.01)
     # Try multiple methods for compatibility with all pyrogram versions
     for attempt in range(4):
         try:
@@ -730,12 +750,13 @@ async def _ensure_in_vc(chat_id: int):
     This fixes the issue where pytgcalls.play() with auto_start
     sometimes fails to join the VC.
     """
-    if pytgcalls is None:
+    ub, ptc = _assistant_for_chat(chat_id)
+    if ptc is None:
         raise RuntimeError("Music streaming is disabled -- STRING_SESSION not configured.")
 
     # Check if already in a call for this chat
     try:
-        calls = pytgcalls.calls
+        calls = ptc.calls
         if asyncio.iscoroutine(calls):
             calls = await calls
         if chat_id in calls:
@@ -746,7 +767,7 @@ async def _ensure_in_vc(chat_id: int):
 
     # Try to check active calls via pytgcalls
     try:
-        active_calls = pytgcalls.active_calls
+        active_calls = ptc.active_calls
         if asyncio.iscoroutine(active_calls):
             active_calls = await active_calls
         elif isinstance(active_calls, (list, dict, set)):
@@ -767,6 +788,12 @@ async def _do_play(chat_id: int, stream):
     while other chats remain fully parallel.
     """
     async with _get_play_lock(chat_id):
+        orphan = _orphan_play_tasks.pop(chat_id, None)
+        if orphan and not orphan.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(orphan), timeout=10.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
         await _do_play_locked(chat_id, stream)
 
 
@@ -787,7 +814,8 @@ async def _do_play_locked(chat_id: int, stream):
     or pytgcalls will be cancelled mid-``play()`` and left wedged for
     the next track.
     """
-    if pytgcalls is None:
+    _, ptc = _assistant_for_chat(chat_id)
+    if ptc is None:
         raise RuntimeError("Music streaming is disabled -- STRING_SESSION not configured.")
 
     # If we are already streaming in this chat, the new play() call will
@@ -816,7 +844,7 @@ async def _do_play_locked(chat_id: int, stream):
         wedged pytgcalls connection cannot keep us stuck in the call.
         """
         for method_name in ("leave_call", "leave_group_call"):
-            fn = getattr(pytgcalls, method_name, None)
+            fn = getattr(ptc, method_name, None)
             if fn is None:
                 continue
             try:
@@ -852,54 +880,69 @@ async def _do_play_locked(chat_id: int, stream):
             # Brief pause for Telegram to register the leave before rejoin
             await asyncio.sleep(0.3)
 
+        async def _play_and_wait(coro, label: str) -> bool:
+            play_task = asyncio.create_task(coro)
+
+            def _orphan_done(task: asyncio.Task) -> None:
+                try:
+                    task.result()
+                    _active_chats.add(chat_id)
+                    LOG.info("Background play task succeeded for %s", chat_id)
+                except Exception as exc:
+                    LOG.debug("Background play task failed for %s: %s", chat_id, exc)
+
+            play_task.add_done_callback(_orphan_done)
+            done, pending = await asyncio.wait(
+                [play_task], timeout=PLAY_METHOD_TIMEOUT,
+            )
+            if play_task in pending:
+                _orphan_play_tasks[chat_id] = play_task
+                LOG.warning(
+                    "play() taking >%.1fs for %s — proceeding without cancelling native call",
+                    PLAY_METHOD_TIMEOUT, chat_id,
+                )
+                return False
+            play_task.result()
+            _active_chats.add(chat_id)
+            LOG.info("%s succeeded for %s", label, chat_id)
+            return True
+
         # Method 1: play() with GroupCallConfig (py-tgcalls >= 2.1)
         if _HAS_GROUP_CALL_CONFIG:
             try:
-                await asyncio.wait_for(
-                    pytgcalls.play(
+                if await _play_and_wait(
+                    ptc.play(
                         chat_id, stream,
                         config=GroupCallConfig(auto_start=True),
                     ),
-                    timeout=PLAY_METHOD_TIMEOUT,
-                )
-                _active_chats.add(chat_id)
-                LOG.info("play() with GroupCallConfig succeeded for %s", chat_id)
-                return True
-            except asyncio.TimeoutError:
+                    "play() with GroupCallConfig",
+                ):
+                    return True
                 LOG.warning("play() with GroupCallConfig TIMED OUT for %s — aborting attempt", chat_id)
                 return False
             except (TypeError, AttributeError) as e:
                 LOG.debug("play() with GroupCallConfig API mismatch: %s — trying plain play()", e)
             except Exception as e:
-                # Unknown error — log and let the next method try.
                 LOG.debug("play() with GroupCallConfig errored: %s", e)
 
         # Method 2: plain play() (py-tgcalls 2.2.x)
         try:
-            await asyncio.wait_for(
-                pytgcalls.play(chat_id, stream),
-                timeout=PLAY_METHOD_TIMEOUT,
-            )
-            _active_chats.add(chat_id)
-            LOG.info("play() succeeded for %s", chat_id)
-            return True
-        except asyncio.TimeoutError:
+            if await _play_and_wait(
+                ptc.play(chat_id, stream), "play()"
+            ):
+                return True
             LOG.warning("plain play() TIMED OUT for %s — aborting attempt", chat_id)
             return False
         except Exception as e:
             LOG.debug("play() failed: %s", e)
 
         # Method 3: explicit join_group_call (older py-tgcalls)
-        if hasattr(pytgcalls, 'join_group_call'):
+        if hasattr(ptc, 'join_group_call'):
             try:
-                await asyncio.wait_for(
-                    pytgcalls.join_group_call(chat_id, stream),
-                    timeout=PLAY_METHOD_TIMEOUT,
-                )
-                _active_chats.add(chat_id)
-                LOG.info("join_group_call() succeeded for %s", chat_id)
-                return True
-            except asyncio.TimeoutError:
+                if await _play_and_wait(
+                    ptc.join_group_call(chat_id, stream), "join_group_call()"
+                ):
+                    return True
                 LOG.warning("join_group_call() TIMED OUT for %s", chat_id)
             except Exception as e:
                 LOG.debug("join_group_call() also failed: %s", e)
@@ -922,7 +965,7 @@ async def _do_play_locked(chat_id: int, stream):
     LOG.info("Play failed for %s — trying to auto-join assistant to the group", chat_id)
 
     async def _aj_direct():
-        await asyncio.wait_for(userbot.join_chat(chat_id), timeout=5.0)
+        await asyncio.wait_for(ub.join_chat(chat_id), timeout=5.0)
         return "chat_id"
 
     async def _aj_invite():
@@ -931,7 +974,7 @@ async def _do_play_locked(chat_id: int, stream):
         )
         if not invite_link:
             raise RuntimeError("no invite link")
-        await asyncio.wait_for(userbot.join_chat(invite_link), timeout=5.0)
+        await asyncio.wait_for(ub.join_chat(invite_link), timeout=5.0)
         return "invite_link"
 
     async def _aj_fresh():
@@ -945,7 +988,7 @@ async def _do_play_locked(chat_id: int, stream):
             raise RuntimeError("no fresh invite")
         link = new_link.invite_link
         try:
-            await asyncio.wait_for(userbot.join_chat(link), timeout=5.0)
+            await asyncio.wait_for(ub.join_chat(link), timeout=5.0)
             return "fresh_invite"
         finally:
             try:
@@ -956,7 +999,7 @@ async def _do_play_locked(chat_id: int, stream):
                 pass
 
     async def _aj_add():
-        _me = await asyncio.wait_for(userbot.get_me(), timeout=2.5)
+        _me = await asyncio.wait_for(ub.get_me(), timeout=2.5)
         await asyncio.wait_for(
             bot.add_chat_members(chat_id, _me.id), timeout=4.0,
         )
@@ -1037,97 +1080,139 @@ def _format_progress(elapsed: int, total: int) -> str:
     return f"{t['bar_left']}  {elapsed_str}  {bar}  {total_str}"
 
 
-async def _start_progress_timer(chat_id: int, duration: int):
-    """Start a background task that updates the Now Playing message with progress."""
-    # Cancel existing timer for this chat
-    _stop_progress_timer(chat_id)
-    
-    _play_start_times[chat_id] = time.time()
-    _play_durations[chat_id] = duration
-    
-    async def _update_progress():
-        """Periodically update the Now Playing message with progress."""
-        update_interval = 5  # Update every 5 seconds
-        color_cycle_interval = 6  # Change color every 6 updates (30 seconds)
-        update_count = 0
-        
-        while True:
-            await asyncio.sleep(update_interval)
-            update_count += 1
-            
-            if chat_id not in _play_start_times:
-                return
-            
-            if chat_id not in _now_playing_messages or not _now_playing_messages[chat_id]:
-                return
-            
-            elapsed = int(time.time() - _play_start_times[chat_id])
-            total = _play_durations.get(chat_id, 0)
-            
-            # Stop updating if we've exceeded duration + buffer
-            if total > 0 and elapsed > total + 30:
-                return
-            
-            # Get current track info
-            current = await get_current(chat_id)
-            if not current:
-                return
-            
-            # Get next color for button cycling
-            if update_count % color_cycle_interval == 0:
-                color = _get_next_color()
-            else:
-                color = "🎵"
+def _build_progress_text(current, elapsed: int, total: int) -> str:
+    progress_text = _format_progress(elapsed, total)
+    dur = format_duration(total)
+    t = _get_current_theme()
+    return (
+        f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
+        f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{current.title}]({current.url})\n"
+        f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
+        f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {current.requester}\n\n"
+        f"{progress_text}\n\n🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
+    )
 
-            progress_text = _format_progress(elapsed, total)
 
-            dur = format_duration(total)
-            t = _get_current_theme()
-            text = (
-                f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
-                f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{current.title}]({current.url})\n"
-                f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
-                f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {current.requester}\n\n"
-                f"{progress_text}"
-                f"\n\n🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
-            )
-            
-            # Update the most recent Now Playing message
-            last_msg = _now_playing_messages[chat_id][-1] if _now_playing_messages[chat_id] else None
-            if last_msg:
+async def _central_progress_loop():
+    while True:
+        await asyncio.sleep(PROGRESS_INTERVAL_SEC)
+        chats = list(_progress_state.keys())
+        edited = 0
+        for chat_id in chats:
+            if edited >= PROGRESS_PER_TICK_CAP:
+                break
+            state = _progress_state.get(chat_id)
+            if not state:
+                continue
+            try:
+                elapsed = int(time.time() - state["start"])
+                total = state["duration"]
+                if total > 0 and elapsed > total + 30:
+                    _progress_state.pop(chat_id, None)
+                    continue
+                msgs = _now_playing_messages.get(chat_id) or []
+                if not msgs:
+                    continue
+                if time.time() - state.get("last_update", 0) < 25:
+                    continue
+                state["last_update"] = time.time()
+                current = await get_current(chat_id)
+                if not current:
+                    continue
+                text = _build_progress_text(current, elapsed, total)
+                last_msg = msgs[-1]
                 try:
-                    # Check if it's a photo message or text message
-                    if hasattr(last_msg, 'photo') and last_msg.photo:
+                    if hasattr(last_msg, "photo") and last_msg.photo:
                         await last_msg.edit_caption(
-                            caption=text,
-                            reply_markup=_control_keyboard(color),
+                            caption=text, reply_markup=_control_keyboard(),
                         )
                     else:
                         await last_msg.edit_text(
-                            text,
-                            reply_markup=_control_keyboard(color),
+                            text, reply_markup=_control_keyboard(),
                         )
+                    edited += 1
                 except Exception as e:
-                    LOG.debug("Progress update failed for %s: %s", chat_id, e)
-                    # If message was deleted, stop updating
+                    LOG.warning("Progress edit failed for %s: %s", chat_id, e)
                     if "MESSAGE_ID_INVALID" in str(e) or "message not found" in str(e).lower():
-                        return
-    
-    task = asyncio.create_task(_update_progress())
-    _progress_tasks[chat_id] = task
+                        _progress_state.pop(chat_id, None)
+            except Exception as e:
+                LOG.debug("central progress tick failed for %s: %s", chat_id, e)
+
+
+async def _stream_health_watchdog(chat_id: int):
+    last_pos = -1
+    frozen_count = 0
+    while chat_id in _play_start_times:
+        await asyncio.sleep(20)
+        _, ptc = _assistant_for_chat(chat_id)
+        if ptc is None:
+            return
+        try:
+            pos = await ptc.played_time(chat_id)
+        except Exception:
+            return
+        if pos == last_pos and pos > 0:
+            frozen_count += 1
+            if frozen_count >= 2:
+                LOG.warning(
+                    "Stream frozen in %s (native pos stuck at %ds) — auto-next", chat_id, pos,
+                )
+                try:
+                    from MusicLyrics.plugins.play.queue import skip_queue as _sq
+                    nxt = await _sq(chat_id, force=True)
+                    if nxt:
+                        await _try_play_chain(chat_id, nxt)
+                except Exception as e:
+                    LOG.exception("watchdog auto-next failed: %s", e)
+                return
+        else:
+            frozen_count = 0
+            last_pos = pos
+
+
+async def _start_progress_timer(chat_id: int, duration: int):
+    """Register chat for centralized progress updates."""
+    global _central_progress_task
+    _progress_state[chat_id] = {
+        "start": time.time(),
+        "duration": duration,
+        "last_update": 0.0,
+    }
+    _play_start_times[chat_id] = time.time()
+    _play_durations[chat_id] = duration
+    if _central_progress_task is None or _central_progress_task.done():
+        _central_progress_task = asyncio.create_task(_central_progress_loop())
+    try:
+        asyncio.create_task(_stream_health_watchdog(chat_id))
+    except Exception:
+        pass
 
 
 def _stop_progress_timer(chat_id: int):
-    """Stop the progress timer for a chat."""
-    if chat_id in _progress_tasks:
-        try:
-            _progress_tasks[chat_id].cancel()
-        except Exception:
-            pass
-        del _progress_tasks[chat_id]
-    
+    """Unregister chat from progress updates."""
+    _progress_state.pop(chat_id, None)
     _play_start_times.pop(chat_id, None)
     _play_durations.pop(chat_id, None)
+
+
+def _cleanup_chat_state(chat_id: int) -> None:
+    """Atomic cleanup of all per-chat state when a chat goes inactive."""
+    _active_chats.discard(chat_id)
+    _play_start_times.pop(chat_id, None)
+    _play_durations.pop(chat_id, None)
+    _last_successful_platform.pop(chat_id, None)
+    _skip_locks.pop(chat_id, None)
+    _play_locks.pop(chat_id, None)
+    _END_HANDLING.pop(chat_id, None)
+    _suppress_stream_end.pop(chat_id, None)
+    _auto_next_in_progress.discard(chat_id)
+    _orphan_play_tasks.pop(chat_id, None)
+    _progress_state.pop(chat_id, None)
+    try:
+        from MusicLyrics.utils.safe_send import clear_chat_state
+        clear_chat_state(chat_id)
+    except Exception:
+        pass
 
 
 # -- Public API ---
@@ -1515,14 +1600,15 @@ async def _raw_leave_group_call(chat_id: int) -> bool:
 
     Returns True on success.
     """
-    if userbot is None:
+    ub, _ = get_assistant(chat_id)
+    if ub is None:
         return False
     try:
         from pyrogram.raw import functions, types as _raw_types  # noqa: F401
     except Exception:
         return False
     try:
-        peer = await userbot.resolve_peer(chat_id)
+        peer = await ub.resolve_peer(chat_id)
     except Exception as e:
         LOG.debug("raw_leave: resolve_peer failed for %s: %s", chat_id, e)
         return False
@@ -1531,14 +1617,14 @@ async def _raw_leave_group_call(chat_id: int) -> bool:
     input_call = None
     try:
         if hasattr(peer, "channel_id"):
-            full = await userbot.invoke(
+            full = await ub.invoke(
                 functions.channels.GetFullChannel(channel=peer)
             )
             call = getattr(full.full_chat, "call", None)
             if call is not None:
                 input_call = call
         else:
-            full = await userbot.invoke(
+            full = await ub.invoke(
                 functions.messages.GetFullChat(chat_id=peer.chat_id)
             )
             call = getattr(full.full_chat, "call", None)
@@ -1555,7 +1641,7 @@ async def _raw_leave_group_call(chat_id: int) -> bool:
 
     try:
         await asyncio.wait_for(
-            userbot.invoke(
+            ub.invoke(
                 functions.phone.LeaveGroupCall(call=input_call, source=0)
             ),
             timeout=5.0,
@@ -1582,13 +1668,13 @@ async def _background_ensure_left(chat_id: int, attempts: int = 6) -> None:
     "leaving voice chat" message; we just need the userbot to actually
     drop out of the call.
     """
+    _, ptc = get_assistant(chat_id)
     for i in range(attempts):
         await asyncio.sleep(2.5 * (i + 1))  # 2.5, 5, 7.5, 10, 12.5, 15s
-        # Check if pytgcalls says we're still in the call
         still_in = False
         try:
-            if pytgcalls is not None:
-                calls = pytgcalls.calls
+            if ptc is not None:
+                calls = ptc.calls
                 if asyncio.iscoroutine(calls):
                     calls = await calls
                 if isinstance(calls, dict) and chat_id in calls:
@@ -1602,10 +1688,9 @@ async def _background_ensure_left(chat_id: int, attempts: int = 6) -> None:
             return
         LOG.info("background_ensure_left: %s still in VC — retry %d/%d",
                  chat_id, i + 1, attempts)
-        # Try pytgcalls again
-        if pytgcalls is not None:
+        if ptc is not None:
             for method_name in ("leave_call", "leave_group_call"):
-                fn = getattr(pytgcalls, method_name, None)
+                fn = getattr(ptc, method_name, None)
                 if fn is None:
                     continue
                 try:
@@ -1614,7 +1699,6 @@ async def _background_ensure_left(chat_id: int, attempts: int = 6) -> None:
                     break
                 except Exception:
                     continue
-        # And raw fallback
         try:
             await _raw_leave_group_call(chat_id)
         except Exception:
@@ -1623,18 +1707,19 @@ async def _background_ensure_left(chat_id: int, attempts: int = 6) -> None:
 
 async def _raw_leave_check(chat_id: int) -> bool:
     """Return True if the userbot is still listed as a participant in *chat_id*'s GroupCall."""
-    if userbot is None:
+    ub, _ = get_assistant(chat_id)
+    if ub is None:
         return False
     try:
         from pyrogram.raw import functions
     except Exception:
         return False
     try:
-        peer = await userbot.resolve_peer(chat_id)
+        peer = await ub.resolve_peer(chat_id)
         if hasattr(peer, "channel_id"):
-            full = await userbot.invoke(functions.channels.GetFullChannel(channel=peer))
+            full = await ub.invoke(functions.channels.GetFullChannel(channel=peer))
         else:
-            full = await userbot.invoke(functions.messages.GetFullChat(chat_id=peer.chat_id))
+            full = await ub.invoke(functions.messages.GetFullChat(chat_id=peer.chat_id))
         return getattr(full.full_chat, "call", None) is not None
     except Exception:
         return False
@@ -1664,10 +1749,11 @@ async def leave_voice_chat(chat_id: int) -> None:
     # 2.5s per method is enough — anything slower means the call is dead
     # and we should fall through to the raw API leave fast.
     LEAVE_METHOD_TIMEOUT = 2.5
-    if pytgcalls is not None:
+    _, ptc = get_assistant(chat_id)
+    if ptc is not None:
         for attempt in range(2):
             for method_name in ("leave_call", "leave_group_call"):
-                fn = getattr(pytgcalls, method_name, None)
+                fn = getattr(ptc, method_name, None)
                 if fn is None:
                     continue
                 try:
@@ -1726,13 +1812,8 @@ async def leave_voice_chat(chat_id: int) -> None:
             pass
 
     # Always clean up state regardless of whether leave succeeded
-    _active_chats.discard(chat_id)
-    # Clear now playing messages tracking (don't delete — user wants messages kept)
+    _cleanup_chat_state(chat_id)
     await _pop_now_playing(chat_id)
-    # Clean up skip lock, suppression counter and auto-next tracking
-    _skip_locks.pop(chat_id, None)
-    _suppress_stream_end.pop(chat_id, None)
-    _auto_next_in_progress.discard(chat_id)
     await clear_queue(chat_id)
 
 
@@ -1930,7 +2011,8 @@ async def _ensure_assistant_in_vc(chat_id: int) -> None:
        and the next play() inherits a wedged WebRTC session.
     4. Run pre_join_vc so the assistant is a member of the group.
     """
-    if pytgcalls is None or userbot is None:
+    ub, ptc = _assistant_for_chat(chat_id)
+    if ptc is None or ub is None:
         return
 
     # 1 + 2: drop stale bookkeeping so the next play() doesn't suppress
@@ -1942,7 +2024,7 @@ async def _ensure_assistant_in_vc(chat_id: int) -> None:
     # pytgcalls leave methods AND the raw API leave so a wedged pytgcalls
     # connection cannot keep us "stuck in a phantom call".
     for method_name in ("leave_call", "leave_group_call"):
-        fn = getattr(pytgcalls, method_name, None)
+        fn = getattr(ptc, method_name, None)
         if fn is None:
             continue
         try:

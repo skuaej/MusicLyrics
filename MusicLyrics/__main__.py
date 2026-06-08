@@ -10,6 +10,28 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+# Patch pyrogram MsgFactory to use crypto-strong random IDs instead of
+# time-based duplicates. This helps eliminate RANDOM_ID_DUPLICATE storms
+# under high concurrency across multiple chats.
+try:
+    import secrets
+    from pyrogram import session as _session
+    if hasattr(_session, "MsgFactory"):
+        def _crypto_msg_id(self):
+            return secrets.randbits(63)
+        _session.MsgFactory.msg_id = _crypto_msg_id
+except Exception:
+    pass
+
+try:
+    import pyrogram.client as _pc
+    _orig_send_message = _pc.Client.send_message
+    async def _patched_send_message(self, chat_id, text, *args, **kwargs):
+        return await _orig_send_message(self, chat_id, text, *args, **kwargs)
+    _pc.Client.send_message = _patched_send_message
+except Exception:
+    pass
+
 # ── Bounded ThreadPoolExecutor for blocking yt-dlp / network calls ──────
 # Default asyncio executor on Railway free tier has only ~5-6 worker
 # threads (min(32, cpu_count + 4)). When a queue holds 3+ tracks and each
@@ -737,18 +759,22 @@ async def main():
     bot_me = await get_bot_info()
     LOG.info("Bot identity: @%s (ID: %d)", bot_me.username, bot_me.id)
 
+    from MusicLyrics.userbot import get_all_userbots, get_all_pytgcalls
+
     if Config.STRING_SESSION and userbot and pytgcalls:
-        LOG.info("Step 4: Starting userbot + PyTgCalls...")
-        await _start_with_retry(userbot, "Userbot")
-        try:
-            await pytgcalls.start()
-            LOG.info("PyTgCalls started.")
-        except Exception:
-            LOG.exception("PyTgCalls failed to start.")
-            log_to_group(
-                "**Warning:** PyTgCalls failed to start.\n"
-                "Music streaming may not work."
-            )
+        LOG.info("Step 4: Starting userbot pool + PyTgCalls...")
+        for idx, ub in enumerate(get_all_userbots(), start=1):
+            await _start_with_retry(ub, f"Userbot[{idx}]")
+        for ptc in get_all_pytgcalls():
+            try:
+                await ptc.start()
+                LOG.info("PyTgCalls instance started: %s", getattr(ptc, 'client', ptc))
+            except Exception:
+                LOG.exception("PyTgCalls start failed for %s", getattr(ptc, 'client', ptc))
+                log_to_group(
+                    "**Warning:** PyTgCalls failed to start for one assistant.\n"
+                    "Music streaming may not work for some groups."
+                )
     else:
         LOG.info("Step 4: Skipped userbot (STRING_SESSION not set).")
 
