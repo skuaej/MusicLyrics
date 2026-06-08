@@ -77,7 +77,15 @@ _play_durations: dict[int, int] = {}
 _progress_state: dict[int, dict] = {}
 _central_progress_task: Optional[asyncio.Task] = None
 
-PROGRESS_INTERVAL_SEC = 30  # Lower API rate by updating less often.
+# Chats that have already received the first-play "warm-up" cycle.
+# Workaround for the well-known py-tgcalls cold-start bug where the very
+# first play() in a chat returns success but no audio is actually bound
+# to the WebRTC track ("first song no sound" symptom). A brief
+# pause→resume cycle right after the initial play forces py-tgcalls to
+# (re)bind the audio stream, making the first track audible.
+_warmed_up_chats: set[int] = set()
+
+PROGRESS_INTERVAL_SEC = 5  # Update the "now playing" progress every 5 seconds.
 PROGRESS_PER_TICK_CAP = 50  # Max edits per tick to avoid burst FLOOD.
 
 # Track which platform last succeeded for each chat — prioritize it next time
@@ -808,6 +816,43 @@ async def _ensure_in_vc(chat_id: int):
     LOG.info("Ensuring userbot is in voice chat for chat %s", chat_id)
 
 
+async def _warmup_first_play_if_needed(chat_id: int) -> None:
+    """Force py-tgcalls to bind audio after the very first play in a chat.
+
+    The well-known "first song no sound" symptom on py-tgcalls 2.x: the
+    initial play() call returns success, but because the WebRTC
+    negotiation with Telegram completed *after* pytgcalls latched the
+    media source, the audio track never actually gets bound — listeners
+    in the voice chat hear silence for the entire first track.
+
+    A tiny pause→resume cycle right after the first successful play
+    forces pytgcalls to re-bind the audio track on the active call,
+    which makes the very first song audible. Subsequent plays in the
+    same chat are not affected, so we only do this once per chat.
+    """
+    if chat_id in _warmed_up_chats:
+        return
+    _warmed_up_chats.add(chat_id)
+    _, ptc = _assistant_for_chat(chat_id)
+    if ptc is None:
+        return
+    try:
+        # Let the call finish negotiating before we toggle the stream.
+        await asyncio.sleep(0.4)
+        pause_fn = getattr(ptc, "pause", None) or getattr(ptc, "pause_stream", None)
+        resume_fn = getattr(ptc, "resume", None) or getattr(ptc, "resume_stream", None)
+        if pause_fn is None or resume_fn is None:
+            return
+        await asyncio.wait_for(pause_fn(chat_id), timeout=2.0)
+        await asyncio.sleep(0.15)
+        await asyncio.wait_for(resume_fn(chat_id), timeout=2.0)
+        LOG.info("First-play audio warm-up completed for %s", chat_id)
+    except Exception as e:
+        # Warm-up is best-effort: even if it fails the original play()
+        # is still running, so we never want to break playback here.
+        LOG.debug("First-play warm-up failed for %s: %s", chat_id, e)
+
+
 async def _do_play(chat_id: int, stream):
     """Public _do_play wrapper that serializes pytgcalls.play() per chat.
 
@@ -980,11 +1025,13 @@ async def _do_play_locked(chat_id: int, stream):
 
     # First attempt — no reset needed
     if await _try_play():
+        await _warmup_first_play_if_needed(chat_id)
         return
 
     # Second attempt — reset call state first (handles wedged py-tgcalls)
     LOG.info("First play attempt failed for %s — resetting call state and retrying", chat_id)
     if await _try_play(reset_first=True):
+        await _warmup_first_play_if_needed(chat_id)
         return
 
     # If first attempt failed, assistant might not be in the group yet.
@@ -1074,6 +1121,7 @@ async def _do_play_locked(chat_id: int, stream):
         # Without this reset, pytgcalls keeps thinking it's still in
         # the call and the next play() hangs again.
         if await _try_play(reset_first=True):
+            await _warmup_first_play_if_needed(chat_id)
             return
 
     # All play methods failed — HARD RESET so we never inherit a wedged
@@ -1148,7 +1196,7 @@ async def _central_progress_loop():
                     msgs = _now_playing_messages.get(chat_id) or []
                     if not msgs:
                         continue
-                    if time.time() - state.get("last_update", 0) < 25:
+                    if time.time() - state.get("last_update", 0) < 4:
                         continue
                     state["last_update"] = time.time()
                     current = await get_current(chat_id)
@@ -1257,6 +1305,10 @@ def _cleanup_chat_state(chat_id: int) -> None:
     _END_HANDLING.pop(chat_id, None)
     _suppress_stream_end.pop(chat_id, None)
     _auto_next_in_progress.discard(chat_id)
+    # Drop the warm-up flag so the next session in this chat (after
+    # leaving + rejoining the VC) re-applies the first-play audio
+    # warm-up. Without this the bug would re-appear on rejoin.
+    _warmed_up_chats.discard(chat_id)
     # Cancel any orphan play task we still hold for this chat so it does
     # not linger forever consuming pytgcalls native state.
     t = _orphan_play_tasks.pop(chat_id, None)
