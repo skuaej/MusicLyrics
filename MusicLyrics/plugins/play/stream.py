@@ -837,16 +837,34 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
     if ptc is None:
         return
     try:
-        # Let the call finish negotiating before we toggle the stream.
-        await asyncio.sleep(0.4)
-        pause_fn = getattr(ptc, "pause", None) or getattr(ptc, "pause_stream", None)
-        resume_fn = getattr(ptc, "resume", None) or getattr(ptc, "resume_stream", None)
-        if pause_fn is None or resume_fn is None:
-            return
-        await asyncio.wait_for(pause_fn(chat_id), timeout=2.0)
-        await asyncio.sleep(0.15)
-        await asyncio.wait_for(resume_fn(chat_id), timeout=2.0)
-        LOG.info("First-play audio warm-up completed for %s", chat_id)
+        # Give the call enough time to finish negotiating before we toggle.
+        await asyncio.sleep(0.8)
+
+        for pause_name, resume_name in (
+            ("pause", "resume"),
+            ("pause_stream", "resume_stream"),
+        ):
+            pause_fn = getattr(ptc, pause_name, None)
+            resume_fn = getattr(ptc, resume_name, None)
+            if pause_fn is None or resume_fn is None:
+                continue
+            try:
+                await asyncio.wait_for(pause_fn(chat_id), timeout=2.5)
+                await asyncio.sleep(0.25)
+                await asyncio.wait_for(resume_fn(chat_id), timeout=2.5)
+                await asyncio.sleep(0.25)
+                LOG.info(
+                    "First-play audio warm-up completed for %s using %s/%s",
+                    chat_id, pause_name, resume_name,
+                )
+                return
+            except Exception as inner_exc:
+                LOG.debug(
+                    "First-play warm-up attempt %s/%s failed for %s: %s",
+                    pause_name, resume_name, chat_id, inner_exc,
+                )
+
+        LOG.debug("First-play warm-up not available for %s: no pause/resume API", chat_id)
     except Exception as e:
         # Warm-up is best-effort: even if it fails the original play()
         # is still running, so we never want to break playback here.
