@@ -871,6 +871,16 @@ async def _do_play(chat_id: int, stream):
         await _do_play_locked(chat_id, stream)
 
 
+async def _drain_orphan_play_task(chat_id: int, timeout: float = 10.0) -> None:
+    """Wait briefly for any previously orphaned play() task to finish."""
+    orphan = _orphan_play_tasks.pop(chat_id, None)
+    if orphan and not orphan.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(orphan), timeout=timeout)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+
 async def _do_play_locked(chat_id: int, stream):
     """Call pytgcalls.play — join VC if needed, then start streaming.
 
@@ -891,6 +901,16 @@ async def _do_play_locked(chat_id: int, stream):
     _, ptc = _assistant_for_chat(chat_id)
     if ptc is None:
         raise RuntimeError("Music streaming is disabled -- STRING_SESSION not configured.")
+
+    # Ensure the assistant is actually in the group/VC before issuing play().
+    try:
+        await pre_join_vc(chat_id)
+    except Exception as e:
+        LOG.debug("_do_play_locked: pre_join_vc failed for %s: %s", chat_id, e)
+
+    # If a previous timed-out play() is still running, wait briefly so we
+    # do not launch a second native play() on the same chat at the same time.
+    await _drain_orphan_play_task(chat_id)
 
     # If we are already streaming in this chat, the new play() call will
     # terminate the old stream causing a StreamAudioEnded event.  Suppress
@@ -1027,6 +1047,10 @@ async def _do_play_locked(chat_id: int, stream):
     if await _try_play():
         await _warmup_first_play_if_needed(chat_id)
         return
+
+    # If the first attempt timed out and left a native play task orphaned,
+    # wait briefly before retrying so we don't race another play() call.
+    await _drain_orphan_play_task(chat_id)
 
     # Second attempt — reset call state first (handles wedged py-tgcalls)
     LOG.info("First play attempt failed for %s — resetting call state and retrying", chat_id)
