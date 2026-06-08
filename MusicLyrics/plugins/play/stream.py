@@ -85,8 +85,8 @@ _central_progress_task: Optional[asyncio.Task] = None
 # (re)bind the audio stream, making the first track audible.
 _warmed_up_chats: set[int] = set()
 
-PROGRESS_INTERVAL_SEC = 5  # Update the "now playing" progress every 5 seconds.
-PROGRESS_PER_TICK_CAP = 50  # Max edits per tick to avoid burst FLOOD.
+PROGRESS_INTERVAL_SEC = 30  # Update the "now playing" progress every 30 seconds (was 5).
+PROGRESS_PER_TICK_CAP = 30  # Max edits per tick to avoid burst FLOOD (was 50).
 
 # Track which platform last succeeded for each chat — prioritize it next time
 _last_successful_platform: dict[int, str] = {}
@@ -1238,7 +1238,7 @@ async def _central_progress_loop():
                     msgs = _now_playing_messages.get(chat_id) or []
                     if not msgs:
                         continue
-                    if time.time() - state.get("last_update", 0) < 4:
+                    if time.time() - state.get("last_update", 0) < 15:
                         continue
                     state["last_update"] = time.time()
                     current = await get_current(chat_id)
