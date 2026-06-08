@@ -832,7 +832,6 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
     """
     if chat_id in _warmed_up_chats:
         return
-    _warmed_up_chats.add(chat_id)
     _, ptc = _assistant_for_chat(chat_id)
     if ptc is None:
         return
@@ -853,6 +852,7 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
                 await asyncio.sleep(0.25)
                 await asyncio.wait_for(resume_fn(chat_id), timeout=2.5)
                 await asyncio.sleep(0.25)
+                _warmed_up_chats.add(chat_id)
                 LOG.info(
                     "First-play audio warm-up completed for %s using %s/%s",
                     chat_id, pause_name, resume_name,

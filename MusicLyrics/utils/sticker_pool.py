@@ -207,6 +207,12 @@ async def load_all_packs(client, packs: Optional[list[str]] = None) -> int:
         _last_refresh_ts = time.time()  # avoid hammering on repeated failures
         return len(_all_ids)
 
+    if total == 0:
+        # No stickers loaded and no previous cache. Keep retrying later.
+        LOG.warning("Sticker pool load returned 0 stickers and no previous cache; will retry later.")
+        _stale = True
+        return 0
+
     _pool.clear()
     _all_ids.clear()
     for k, v in fresh_pool.items():
