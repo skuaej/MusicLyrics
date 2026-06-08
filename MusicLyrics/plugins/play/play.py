@@ -763,25 +763,59 @@ async def play_command(client: Client, message: Message):
 
     try:
         if thumbnail:
-            await status_msg.delete()
-            now_playing_msg = await bot.send_photo(
-                chat_id,
-                photo=thumbnail,
-                caption=text,
-                reply_markup=_control_keyboard(color),
-            )
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            try:
+                now_playing_msg = await bot.send_photo(
+                    chat_id,
+                    photo=thumbnail,
+                    caption=text,
+                    reply_markup=_control_keyboard(color),
+                )
+            except Exception as send_exc:
+                # send_photo can fail with WebpageMediaEmpty / MediaEmpty
+                # when YouTube hands us a stale thumbnail. Fall back to a
+                # plain message instead of letting the handler die.
+                LOG.debug("play send_photo failed for %s: %s", chat_id, send_exc)
+                now_playing_msg = await bot.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=_control_keyboard(color),
+                    disable_web_page_preview=True,
+                )
             # Track this message so we can delete it when track ends (thread-safe)
             await _add_now_playing(chat_id, now_playing_msg)
             await _add_reaction(chat_id, message.id)
         else:
-            await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
-            # Track this message (thread-safe)
-            await _add_now_playing(chat_id, status_msg)
+            try:
+                await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
+                await _add_now_playing(chat_id, status_msg)
+            except Exception:
+                new_msg = await bot.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=_control_keyboard(color),
+                    disable_web_page_preview=True,
+                )
+                await _add_now_playing(chat_id, new_msg)
             await _add_reaction(chat_id, message.id)
-    except Exception:
-        await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
-        await _add_now_playing(chat_id, status_msg)
-        await _add_reaction(chat_id, message.id)
+    except Exception as outer_exc:
+        # Last-resort guard so concurrent now-playing render failures
+        # across many groups cannot crash the deployment.
+        LOG.warning("play now-playing render failed for %s: %s", chat_id, outer_exc)
+        try:
+            new_msg = await bot.send_message(
+                chat_id,
+                text,
+                reply_markup=_control_keyboard(color),
+                disable_web_page_preview=True,
+            )
+            await _add_now_playing(chat_id, new_msg)
+            await _add_reaction(chat_id, message.id)
+        except Exception:
+            pass
 
 @bot.on_message(filters.command(["playforce", "pf", "forceplay"]) & not_edited)
 async def playforce_command(client: Client, message: Message):
@@ -945,20 +979,50 @@ async def playforce_command(client: Client, message: Message):
 
     try:
         if thumbnail:
-            await status_msg.delete()
-            now_playing_msg = await bot.send_photo(
-                chat_id,
-                photo=thumbnail,
-                caption=text,
-                reply_markup=_control_keyboard(color),
-            )
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            try:
+                now_playing_msg = await bot.send_photo(
+                    chat_id,
+                    photo=thumbnail,
+                    caption=text,
+                    reply_markup=_control_keyboard(color),
+                )
+            except Exception as send_exc:
+                LOG.debug("playforce send_photo failed for %s: %s", chat_id, send_exc)
+                now_playing_msg = await bot.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=_control_keyboard(color),
+                    disable_web_page_preview=True,
+                )
             await _add_now_playing(chat_id, now_playing_msg)
             await _add_reaction(chat_id, message.id)
         else:
-            await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
-            await _add_now_playing(chat_id, status_msg)
+            try:
+                await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
+                await _add_now_playing(chat_id, status_msg)
+            except Exception:
+                new_msg = await bot.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=_control_keyboard(color),
+                    disable_web_page_preview=True,
+                )
+                await _add_now_playing(chat_id, new_msg)
             await _add_reaction(chat_id, message.id)
-    except Exception:
-        await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
-        await _add_now_playing(chat_id, status_msg)
-        await _add_reaction(chat_id, message.id)
+    except Exception as outer_exc:
+        LOG.warning("playforce now-playing render failed for %s: %s", chat_id, outer_exc)
+        try:
+            new_msg = await bot.send_message(
+                chat_id,
+                text,
+                reply_markup=_control_keyboard(color),
+                disable_web_page_preview=True,
+            )
+            await _add_now_playing(chat_id, new_msg)
+            await _add_reaction(chat_id, message.id)
+        except Exception:
+            pass

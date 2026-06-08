@@ -578,22 +578,61 @@ async def vplay_command(client: Client, message: Message):
 
     try:
         if thumbnail:
-            await status_msg.delete()
-            now_playing_msg = await bot.send_photo(
-                chat_id,
-                photo=thumbnail,
-                caption=text,
-                reply_markup=_control_keyboard(color),
-            )
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            try:
+                now_playing_msg = await bot.send_photo(
+                    chat_id,
+                    photo=thumbnail,
+                    caption=text,
+                    reply_markup=_control_keyboard(color),
+                )
+            except Exception as send_exc:
+                # send_photo can fail with WebpageMediaEmpty / MediaEmpty
+                # when YouTube serves a stale thumbnail URL. Fall back to a
+                # plain message rather than letting the handler die.
+                LOG.debug("vplay send_photo failed for %s: %s", chat_id, send_exc)
+                now_playing_msg = await bot.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=_control_keyboard(color),
+                    disable_web_page_preview=True,
+                )
             # Track this message so we can delete it when track ends (thread-safe)
             await _add_now_playing(chat_id, now_playing_msg)
             await _add_reaction(chat_id, message.id)
         else:
-            await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
-            # Track this message (thread-safe)
-            await _add_now_playing(chat_id, status_msg)
+            try:
+                await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
+                await _add_now_playing(chat_id, status_msg)
+            except Exception:
+                # status_msg may have been deleted by a previous handler in
+                # rapid skip scenarios — send a fresh message instead of
+                # propagating MessageIdInvalid.
+                new_msg = await bot.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=_control_keyboard(color),
+                    disable_web_page_preview=True,
+                )
+                await _add_now_playing(chat_id, new_msg)
             await _add_reaction(chat_id, message.id)
-    except Exception:
-        await status_msg.edit_text(text, reply_markup=_control_keyboard(color))
-        await _add_now_playing(chat_id, status_msg)
-        await _add_reaction(chat_id, message.id)
+    except Exception as outer_exc:
+        # Last-resort guard so the dispatcher never sees an unhandled
+        # exception from the now-playing rendering path. Concurrent
+        # send_photo failures across many groups were the root cause of
+        # the Railway "Deployment crashed" events.
+        LOG.warning("vplay now-playing render failed for %s: %s", chat_id, outer_exc)
+        try:
+            new_msg = await bot.send_message(
+                chat_id,
+                text,
+                reply_markup=_control_keyboard(color),
+                disable_web_page_preview=True,
+            )
+            await _add_now_playing(chat_id, new_msg)
+            await _add_reaction(chat_id, message.id)
+        except Exception:
+            pass

@@ -837,32 +837,38 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
         return
     try:
         # Give the call enough time to finish negotiating before we toggle.
-        await asyncio.sleep(0.8)
+        # On cold-started deployments the WebRTC negotiation can take well
+        # over a second; if we toggle before it's bound, pause/resume is a
+        # no-op and the first track still plays silent. We do two attempts
+        # with progressively longer pre-sleeps so warmup wins even on slow
+        # negotiations.
+        for pre_sleep in (1.2, 2.0):
+            await asyncio.sleep(pre_sleep)
 
-        for pause_name, resume_name in (
-            ("pause", "resume"),
-            ("pause_stream", "resume_stream"),
-        ):
-            pause_fn = getattr(ptc, pause_name, None)
-            resume_fn = getattr(ptc, resume_name, None)
-            if pause_fn is None or resume_fn is None:
-                continue
-            try:
-                await asyncio.wait_for(pause_fn(chat_id), timeout=2.5)
-                await asyncio.sleep(0.25)
-                await asyncio.wait_for(resume_fn(chat_id), timeout=2.5)
-                await asyncio.sleep(0.25)
-                _warmed_up_chats.add(chat_id)
-                LOG.info(
-                    "First-play audio warm-up completed for %s using %s/%s",
-                    chat_id, pause_name, resume_name,
-                )
-                return
-            except Exception as inner_exc:
-                LOG.debug(
-                    "First-play warm-up attempt %s/%s failed for %s: %s",
-                    pause_name, resume_name, chat_id, inner_exc,
-                )
+            for pause_name, resume_name in (
+                ("pause", "resume"),
+                ("pause_stream", "resume_stream"),
+            ):
+                pause_fn = getattr(ptc, pause_name, None)
+                resume_fn = getattr(ptc, resume_name, None)
+                if pause_fn is None or resume_fn is None:
+                    continue
+                try:
+                    await asyncio.wait_for(pause_fn(chat_id), timeout=3.0)
+                    await asyncio.sleep(0.35)
+                    await asyncio.wait_for(resume_fn(chat_id), timeout=3.0)
+                    await asyncio.sleep(0.35)
+                    _warmed_up_chats.add(chat_id)
+                    LOG.info(
+                        "First-play audio warm-up completed for %s using %s/%s",
+                        chat_id, pause_name, resume_name,
+                    )
+                    return
+                except Exception as inner_exc:
+                    LOG.debug(
+                        "First-play warm-up attempt %s/%s failed for %s: %s",
+                        pause_name, resume_name, chat_id, inner_exc,
+                    )
 
         LOG.debug("First-play warm-up not available for %s: no pause/resume API", chat_id)
     except Exception as e:
@@ -1000,6 +1006,19 @@ async def _do_play_locked(chat_id: int, stream):
                     task.result()
                     _active_chats.add(chat_id)
                     LOG.info("Background play task succeeded for %s", chat_id)
+                    # The fast-path call to _warmup_first_play_if_needed in
+                    # _do_play_locked only runs when _try_play returns True
+                    # (i.e. play() finished within PLAY_METHOD_TIMEOUT). When
+                    # play() is slower and gets demoted to an orphan task,
+                    # the warmup was previously skipped — which is the root
+                    # cause of the "first song no sound" symptom on slower
+                    # / cold-started deployments. Schedule warmup here so
+                    # WebRTC re-binds the audio track even on the slow path.
+                    try:
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(_warmup_first_play_if_needed(chat_id))
+                    except Exception:
+                        pass
                 except Exception as exc:
                     LOG.debug("Background play task failed for %s: %s", chat_id, exc)
 
