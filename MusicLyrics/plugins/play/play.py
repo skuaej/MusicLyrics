@@ -56,18 +56,21 @@ async def _safe_edit(msg, text: str, **kwargs) -> bool:
 
     Without this, MessageIdInvalid raised inside an error handler bubbles
     up as an unhandled exception and freezes the dispatcher.
+    Uses safe_send to prevent RANDOM_ID_DUPLICATE storms.
     """
+    from MusicLyrics.utils.safe_send import safe_send, safe_edit
+    
     if msg is None:
         return False
     try:
-        await msg.edit_text(text, **kwargs)
+        await safe_edit(msg, text, **kwargs)
         return True
     except Exception:
         try:
             chat_obj = getattr(msg, "chat", None)
             chat_id = getattr(chat_obj, "id", None) if chat_obj else None
             if chat_id is not None:
-                await bot.send_message(chat_id, text, **kwargs)
+                await safe_send(bot, chat_id, text, **kwargs)
                 return True
         except Exception:
             pass
