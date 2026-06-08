@@ -146,22 +146,33 @@ async def clear_queue(chat_id: int) -> None:
 
 
 async def toggle_loop(chat_id: int) -> bool:
-    """Toggle loop and return new state."""
-    cq = await get_chat_queue(chat_id)
-    cq.loop_mode = not cq.loop_mode
-    return cq.loop_mode
+    """Toggle loop and return new state.
+
+    Must be performed under the global queue lock — otherwise another
+    coroutine (e.g. ``skip_queue``) could mutate ``cq.items`` between the
+    read and write of ``cq.loop_mode`` and corrupt the queue.
+    """
+    async with _lock:
+        cq = _queues.get(chat_id)
+        if cq is None:
+            cq = ChatQueue()
+            _queues[chat_id] = cq
+        cq.loop_mode = not cq.loop_mode
+        return cq.loop_mode
 
 
 async def shuffle_queue(chat_id: int) -> None:
     """Shuffle upcoming items (keep current track in place)."""
-    cq = await get_chat_queue(chat_id)
-    # Since current is always at index 0, shuffle everything after index 0
-    if len(cq.items) > 1:
-        upcoming = cq.items[1:]
-        random.shuffle(upcoming)
-        cq.items[1:] = upcoming
-    LOG.info("Queue %s: shuffled %d upcoming tracks.", chat_id,
-             max(0, len(cq.items) - 1))
+    async with _lock:
+        cq = _queues.get(chat_id)
+        if cq is None or len(cq.items) <= 1:
+            shuffled = 0
+        else:
+            upcoming = cq.items[1:]
+            random.shuffle(upcoming)
+            cq.items[1:] = upcoming
+            shuffled = len(upcoming)
+    LOG.info("Queue %s: shuffled %d upcoming tracks.", chat_id, shuffled)
 
 
 def format_duration(seconds: int) -> str:

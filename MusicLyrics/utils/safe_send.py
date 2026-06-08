@@ -16,7 +16,17 @@ from pyrogram.errors import FloodWait
 LOG = logging.getLogger(__name__)
 
 _chat_send_locks: dict[int, asyncio.Lock] = {}
-_global_send_sem = asyncio.Semaphore(20)
+# Hard cap to defend against an unbounded number of per-chat locks across
+# thousands of groups over a long-running deployment.  When exceeded, drop
+# the oldest entry — a tiny optimisation cost on next access, but keeps
+# memory linear.
+_CHAT_LOCKS_HARD_CAP = 4000
+# A large global semaphore so we cap pyrogram-level concurrency without
+# starving the bot across thousands of groups.  The previous value (20)
+# made a single slow chat block ~50+ groups behind it, which compounded
+# under load and looked like a "freeze".  Per-chat serialization (via
+# _chat_send_locks below) still prevents RANDOM_ID storms.
+_global_send_sem = asyncio.Semaphore(500)
 _flood_until: dict[int, float] = {}
 
 
@@ -25,6 +35,15 @@ def _get_lock(chat_id: int) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         _chat_send_locks[chat_id] = lock
+        # FIFO-evict oldest entries if we're past the cap.  dicts preserve
+        # insertion order in Py 3.7+ so this is O(1) amortised.
+        if len(_chat_send_locks) > _CHAT_LOCKS_HARD_CAP:
+            try:
+                oldest = next(iter(_chat_send_locks))
+                if oldest != chat_id:
+                    _chat_send_locks.pop(oldest, None)
+            except StopIteration:
+                pass
     return lock
 
 

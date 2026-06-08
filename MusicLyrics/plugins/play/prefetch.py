@@ -31,6 +31,17 @@ LOG = logging.getLogger(__name__)
 
 # One worker task per chat — cancelled & replaced whenever a new track starts.
 _prefetch_tasks: dict[int, asyncio.Task] = {}
+# Serialize prefetch task spawn/cancel per chat so two rapid /skip presses
+# don't race and leave orphan tasks running.
+_prefetch_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_prefetch_lock(chat_id: int) -> asyncio.Lock:
+    lock = _prefetch_locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _prefetch_locks[chat_id] = lock
+    return lock
 
 # How long a stream URL is considered "fresh" after resolution.  Most CDN
 # tokens (Google Video, SndCDN, JioSaavn) expire in 5-15 min — we use 90 s
@@ -209,66 +220,80 @@ async def _resolve_item_media(item: QueueItem) -> bool:
 async def prefetch_next(chat_id: int) -> None:
     """Kick off a background task to prefetch the NEXT item in *chat_id*'s queue.
 
-    Safe to call repeatedly — cancels any previous prefetch for the chat first.
+    Safe to call repeatedly — cancels any previous prefetch for the chat first
+    and AWAITS the cancellation to drain so we never leak CancelledError into
+    the event loop on rapid /skip spam (a previous bug that crashed the bot).
     Also fires a lower-priority prefetch for the item AFTER the next one so
     rapid /skip-spam stays instant.
     """
-    old = _prefetch_tasks.pop(chat_id, None)
-    if old and not old.done():
-        try:
+    async with _get_prefetch_lock(chat_id):
+        old = _prefetch_tasks.pop(chat_id, None)
+        if old is not None and not old.done():
             old.cancel()
-        except Exception:
-            pass
-
-    async def _worker():
-        try:
-            cq = await get_chat_queue(chat_id)
-            if len(cq.items) < 2:
-                return
-            next_item = cq.items[1]
-            # If already prefetched (local file, or fresh URL), skip.  Even
-            # then, schedule a refresh if it's a URL nearing expiry — that
-            # way we never serve a stale URL to skip / auto-next.
-            if is_prefetched(next_item) and not next_item.media_path.startswith(("http://", "https://")):
-                LOG.info(
-                    "Prefetch HIT (local file) for %s: '%s'", chat_id, next_item.title
-                )
-            else:
-                LOG.info("Prefetch START for %s: '%s'", chat_id, next_item.title)
-                ok = await _resolve_item_media(next_item)
-                if ok:
-                    LOG.info(
-                        "Prefetch DONE for %s: '%s' -> %s%s",
-                        chat_id, next_item.title,
-                        "URL " if next_item.is_stream_url else "FILE ",
-                        str(next_item.media_path)[:80],
-                    )
-                else:
-                    LOG.warning(
-                        "Prefetch MISS for %s: '%s' — will resolve at play time",
-                        chat_id, next_item.title,
-                    )
-
-            # Also prefetch queue[2] so rapid skipping stays fast.
-            cq2 = await get_chat_queue(chat_id)
-            if len(cq2.items) < 3:
-                return
-            second_item = cq2.items[2]
-            if is_prefetched(second_item) and not second_item.media_path.startswith(("http://", "https://")):
-                return
+            # Drain the cancellation — gather with return_exceptions=True
+            # consumes the CancelledError so it cannot crash the event loop.
             try:
-                await _resolve_item_media(second_item)
-            except asyncio.CancelledError:
-                raise
+                await asyncio.wait_for(
+                    asyncio.shield(asyncio.gather(old, return_exceptions=True)),
+                    timeout=3.0,
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
             except Exception:
                 pass
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            LOG.debug("Prefetch worker error for %s: %s", chat_id, e)
 
-    task = asyncio.create_task(_worker())
-    _prefetch_tasks[chat_id] = task
+        async def _worker():
+            try:
+                cq = await get_chat_queue(chat_id)
+                if len(cq.items) < 2:
+                    return
+                next_item = cq.items[1]
+                # If already prefetched (local file, or fresh URL), skip.  Even
+                # then, schedule a refresh if it's a URL nearing expiry — that
+                # way we never serve a stale URL to skip / auto-next.
+                if is_prefetched(next_item) and not next_item.media_path.startswith(("http://", "https://")):
+                    LOG.info(
+                        "Prefetch HIT (local file) for %s: '%s'", chat_id, next_item.title
+                    )
+                else:
+                    LOG.info("Prefetch START for %s: '%s'", chat_id, next_item.title)
+                    ok = await _resolve_item_media(next_item)
+                    if ok:
+                        LOG.info(
+                            "Prefetch DONE for %s: '%s' -> %s%s",
+                            chat_id, next_item.title,
+                            "URL " if next_item.is_stream_url else "FILE ",
+                            str(next_item.media_path)[:80],
+                        )
+                    else:
+                        LOG.warning(
+                            "Prefetch MISS for %s: '%s' — will resolve at play time",
+                            chat_id, next_item.title,
+                        )
+
+                # Also prefetch queue[2] so rapid skipping stays fast.
+                cq2 = await get_chat_queue(chat_id)
+                if len(cq2.items) < 3:
+                    return
+                second_item = cq2.items[2]
+                if is_prefetched(second_item) and not second_item.media_path.startswith(("http://", "https://")):
+                    return
+                try:
+                    await _resolve_item_media(second_item)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+            except asyncio.CancelledError:
+                # Don't re-raise — gather() above will collect it. Re-raising
+                # here used to escape into the event loop and crash on rapid
+                # /skip spam.
+                return
+            except Exception as e:
+                LOG.debug("Prefetch worker error for %s: %s", chat_id, e)
+
+        task = asyncio.create_task(_worker())
+        _prefetch_tasks[chat_id] = task
 
 
 async def refresh_item_if_stale(item: QueueItem) -> bool:
@@ -285,10 +310,48 @@ async def refresh_item_if_stale(item: QueueItem) -> bool:
 
 
 def cancel_prefetch(chat_id: int) -> None:
-    """Cancel any pending prefetch task for *chat_id*."""
+    """Cancel any pending prefetch task for *chat_id* (fire-and-forget).
+
+    Use ``await cancel_prefetch_async(chat_id)`` instead when you can — that
+    variant awaits the cancellation so no orphan task survives.
+    """
     t = _prefetch_tasks.pop(chat_id, None)
     if t and not t.done():
         try:
             t.cancel()
         except Exception:
             pass
+    # The cancellation happens asynchronously; we cannot await here.  Spawn
+    # a drainer so the CancelledError gets consumed off the event loop.
+    if t is not None and not t.done():
+        async def _drain():
+            try:
+                await asyncio.gather(t, return_exceptions=True)
+            except Exception:
+                pass
+        try:
+            asyncio.create_task(_drain())
+        except RuntimeError:
+            # No running loop — nothing we can do.
+            pass
+
+
+async def cancel_prefetch_async(chat_id: int) -> None:
+    """Async variant of :func:`cancel_prefetch` that awaits the cancellation."""
+    async with _get_prefetch_lock(chat_id):
+        t = _prefetch_tasks.pop(chat_id, None)
+        if t is not None and not t.done():
+            t.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(t, return_exceptions=True),
+                    timeout=3.0,
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+
+
+def clear_prefetch_state(chat_id: int) -> None:
+    """Drop per-chat prefetch state (called when chat goes inactive)."""
+    cancel_prefetch(chat_id)
+    _prefetch_locks.pop(chat_id, None)
