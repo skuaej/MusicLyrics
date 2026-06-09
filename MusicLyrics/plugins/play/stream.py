@@ -718,23 +718,51 @@ def _validate_media(media_path: str) -> None:
 def _make_audio_stream(media_path: str):
     """Create an audio-only MediaStream (file or URL).
 
-    Uses video_flags=IGNORE for audio-only mode, matching
-    the approach used by AnonXMusic.
+    NOTE: We deliberately do NOT use ``video_flags=MediaStream.Flags.IGNORE``
+    here even though that flag would seem to match an "audio only" call.
+    On py-tgcalls 2.x, IGNORE removes the video direction from the SDP
+    that pytgcalls negotiates with Telegram. The audio direction is then
+    set up in a separate negotiation step that races with pytgcalls
+    latching the media source — when the race is lost, the audio track
+    never gets bound and listeners hear COMPLETE silence for the entire
+    first track ("first song no sound" symptom on /play, while /vplay
+    works fine because its full audio+video SDP cannot lose this race).
+
+    Using ``AUTO_DETECT`` (or simply omitting ``video_flags``) preserves
+    the audio direction in the negotiated SDP, eliminating the race so
+    the first track is audible immediately without relying on the
+    pause/resume warm-up workaround.
     """
     if not _HAS_MEDIA_STREAM:
         raise RuntimeError("py-tgcalls MediaStream not available.")
 
     if _HAS_FLAGS:
+        # Mirror the SDP shape used by /vplay (audio + video direction)
+        # so the WebRTC negotiation cannot lose the audio-binding race.
         try:
             return MediaStream(
                 media_path,
                 audio_parameters=AudioQuality.HIGH,
-                video_flags=MediaStream.Flags.IGNORE,
+                video_parameters=VideoQuality.SD_360p,
+                video_flags=MediaStream.Flags.AUTO_DETECT,
             )
         except (AttributeError, TypeError) as e:
-            LOG.debug("MediaStream with Flags failed: %s", e)
+            LOG.debug(
+                "MediaStream with AUTO_DETECT+video_parameters failed: %s", e,
+            )
+        # If the build doesn't accept video_parameters for an audio-only
+        # path, fall back to AUTO_DETECT alone — still safe because
+        # AUTO_DETECT skips the video track when none is present.
+        try:
+            return MediaStream(
+                media_path,
+                audio_parameters=AudioQuality.HIGH,
+                video_flags=MediaStream.Flags.AUTO_DETECT,
+            )
+        except (AttributeError, TypeError) as e:
+            LOG.debug("MediaStream with AUTO_DETECT failed: %s", e)
 
-    # Fallback: just audio parameters
+    # Fallback: just audio parameters (default flag behaviour)
     try:
         return MediaStream(
             media_path,
@@ -839,10 +867,13 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
         # Give the call enough time to finish negotiating before we toggle.
         # On cold-started deployments the WebRTC negotiation can take well
         # over a second; if we toggle before it's bound, pause/resume is a
-        # no-op and the first track still plays silent. We do two attempts
-        # with progressively longer pre-sleeps so warmup wins even on slow
-        # negotiations.
-        for pre_sleep in (1.2, 2.0):
+        # no-op and the first track still plays silent. We do progressively
+        # longer pre-sleeps so warmup wins even on slow negotiations, but
+        # we START with a very short delay so audio binds within a few
+        # hundred milliseconds on fast deployments — the previous 1.2 s
+        # start was audible as a chunk of missing audio at the top of the
+        # first track on every cold start.
+        for pre_sleep in (0.25, 0.6, 1.2, 2.0):
             await asyncio.sleep(pre_sleep)
 
             for pause_name, resume_name in (
@@ -1523,6 +1554,7 @@ async def stream_audio(
     try:
         audio = _make_audio_stream(media_path)
         await _do_play(chat_id, audio)
+        _active_chats.add(chat_id)
         LOG.info("Streaming audio in %s: %s (%s)",
                  chat_id, title, media_path[:100])
         # Track which platform succeeded for auto-next priority
