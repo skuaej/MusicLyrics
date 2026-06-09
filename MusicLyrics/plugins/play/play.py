@@ -773,6 +773,7 @@ async def play_command(client: Client, message: Message):
                     photo=thumbnail,
                     caption=text,
                     reply_markup=_control_keyboard(color),
+                    has_spoiler=True,
                 )
             except Exception as send_exc:
                 # send_photo can fail with WebpageMediaEmpty / MediaEmpty
@@ -989,6 +990,7 @@ async def playforce_command(client: Client, message: Message):
                     photo=thumbnail,
                     caption=text,
                     reply_markup=_control_keyboard(color),
+                    has_spoiler=True,
                 )
             except Exception as send_exc:
                 LOG.debug("playforce send_photo failed for %s: %s", chat_id, send_exc)

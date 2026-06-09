@@ -386,6 +386,7 @@ async def nowplaying_cmd(client: Client, message: Message):
         reply = await bot.send_photo(
             chat_id, photo=current.thumbnail,
             caption=text, reply_markup=_control_keyboard(color),
+            has_spoiler=True,
         )
     else:
         reply = await message.reply_text(text, reply_markup=_control_keyboard(color))

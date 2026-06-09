@@ -588,6 +588,7 @@ async def vplay_command(client: Client, message: Message):
                     photo=thumbnail,
                     caption=text,
                     reply_markup=_control_keyboard(color),
+                    has_spoiler=True,
                 )
             except Exception as send_exc:
                 # send_photo can fail with WebpageMediaEmpty / MediaEmpty
