@@ -59,7 +59,7 @@ async def _safe_edit(msg, text: str, **kwargs) -> bool:
     Uses safe_send to prevent RANDOM_ID_DUPLICATE storms.
     """
     from MusicLyrics.utils.safe_send import safe_send, safe_edit
-    
+
     if msg is None:
         return False
     try:
@@ -75,6 +75,7 @@ async def _safe_edit(msg, text: str, **kwargs) -> bool:
         except Exception:
             pass
         return False
+
 
 from MusicLyrics.plugins.play.platforms.youtube import (
     search_youtube,
@@ -167,9 +168,13 @@ async def _get_audio_media(url: str) -> tuple[str, bool]:
         LOG.debug("Stream URL extraction failed for %s: %s", url, e)
 
     # ── Step 3: YouTube failed — title-search + JioSaavn + SoundCloud ──
-    LOG.info("YouTube methods failed, trying title-search + JioSaavn + SoundCloud for: %s", url)
+    LOG.info(
+        "YouTube methods failed, trying title-search + JioSaavn + SoundCloud for: %s",
+        url,
+    )
 
     from MusicLyrics.plugins.play.platforms.youtube import get_video_info
+
     info = await get_video_info(url)
     title = info.get("title", "") if info else ""
 
@@ -237,12 +242,16 @@ async def _resolve_query(query: str, platform: str, msg: Message):
         info = await get_video_info(query)
         if not info:
             # Try searching by URL as query
-            info = {"title": "YouTube Audio", "url": query,
-                    "duration": 0, "thumbnail": "", "channel": ""}
+            info = {
+                "title": "YouTube Audio",
+                "url": query,
+                "duration": 0,
+                "thumbnail": "",
+                "channel": "",
+            }
         if info["duration"] > Config.DURATION_LIMIT_MIN * 60 and info["duration"] > 0:
             raise ValueError(
-                f"গানটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি, "
-                "play করা যাবে না।"
+                f"গানটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি, play করা যাবে না।"
             )
         media_path, is_stream = await _get_audio_media(query)
         if not media_path:
@@ -250,7 +259,10 @@ async def _resolve_query(query: str, platform: str, msg: Message):
             title_query = info.get("title", "")
             channel_query = info.get("channel", "")
             if title_query and title_query != "YouTube Audio":
-                LOG.info("YouTube URL extraction failed, trying search+download: %s", title_query)
+                LOG.info(
+                    "YouTube URL extraction failed, trying search+download: %s",
+                    title_query,
+                )
                 filepath, dl_info = await search_and_download_audio(
                     f"{title_query} {channel_query}".strip()
                 )
@@ -273,15 +285,21 @@ async def _resolve_query(query: str, platform: str, msg: Message):
                 info = {**yt, "platform": "spotify"}
                 return info, media_path, is_stream
         # ── YouTube yt-dlp search+download as second YT-path ──
-        LOG.info("Spotify -> YouTube search failed, trying yt-dlp search+download: %s", track["query"])
+        LOG.info(
+            "Spotify -> YouTube search failed, trying yt-dlp search+download: %s",
+            track["query"],
+        )
         filepath, dl_info = await search_and_download_audio(track["query"])
         if filepath and dl_info:
             return dl_info, filepath, False
         # ── JioSaavn fallback (when YouTube fully fails) ──
-        LOG.info("Spotify -> YouTube all failed, trying JioSaavn for: %s", track["query"])
+        LOG.info(
+            "Spotify -> YouTube all failed, trying JioSaavn for: %s", track["query"]
+        )
         js_path, js_info = await search_and_download_jiosaavn(track["query"])
         if js_path and js_info:
             import os as _os
+
             if _os.path.isfile(js_path):
                 info = {
                     "title": js_info.get("title", track.get("title", "Unknown")),
@@ -313,7 +331,7 @@ async def _resolve_query(query: str, platform: str, msg: Message):
         song = await get_jiosaavn_song(query)
         if not song:
             raise ValueError("JioSaavn link থেকে তথ্য পাওয়া যায়নি।")
-        yt_query = f"{song['title']} {song.get('artist','')}".strip()
+        yt_query = f"{song['title']} {song.get('artist', '')}".strip()
         # ── YouTube FIRST (user-requested: YouTube every time) ──
         LOG.info("JioSaavn URL: trying YouTube FIRST for: %s", yt_query)
         yt = await search_youtube(yt_query)
@@ -321,7 +339,8 @@ async def _resolve_query(query: str, platform: str, msg: Message):
             media_path, is_stream = await _get_audio_media(yt["url"])
             if media_path:
                 info = {
-                    "title": song["title"], "url": song["url"],
+                    "title": song["title"],
+                    "url": song["url"],
                     "duration": song["duration"],
                     "thumbnail": song.get("thumbnail", ""),
                     "channel": song.get("artist", ""),
@@ -329,7 +348,10 @@ async def _resolve_query(query: str, platform: str, msg: Message):
                 }
                 return info, media_path, is_stream
         # ── YouTube yt-dlp search+download as second YT-path ──
-        LOG.info("JioSaavn -> YouTube search failed, trying yt-dlp search+download: %s", yt_query)
+        LOG.info(
+            "JioSaavn -> YouTube search failed, trying yt-dlp search+download: %s",
+            yt_query,
+        )
         try:
             filepath, dl_info = await search_and_download_audio(yt_query)
             if filepath and dl_info and os.path.isfile(filepath):
@@ -345,13 +367,18 @@ async def _resolve_query(query: str, platform: str, msg: Message):
         except Exception as e:
             LOG.debug("yt-dlp search+download failed for JioSaavn URL: %s", e)
         # ── JioSaavn native fallback ──
-        LOG.info("JioSaavn -> YouTube failed, falling back to JioSaavn native: %s", song["title"])
+        LOG.info(
+            "JioSaavn -> YouTube failed, falling back to JioSaavn native: %s",
+            song["title"],
+        )
         filepath = await download_jiosaavn(query, song_info=song)
         if filepath:
             import os as _os
+
             if _os.path.isfile(filepath):
                 info = {
-                    "title": song["title"], "url": song["url"],
+                    "title": song["title"],
+                    "url": song["url"],
                     "duration": song["duration"],
                     "thumbnail": song.get("thumbnail", ""),
                     "channel": song.get("artist", ""),
@@ -360,9 +387,13 @@ async def _resolve_query(query: str, platform: str, msg: Message):
                 return info, filepath, False
         # JioSaavn stream URL fallback (no disk write)
         if song.get("download_url"):
-            LOG.info("JioSaavn download failed, using JioSaavn stream URL for: %s", song["title"])
+            LOG.info(
+                "JioSaavn download failed, using JioSaavn stream URL for: %s",
+                song["title"],
+            )
             info = {
-                "title": song["title"], "url": song["url"],
+                "title": song["title"],
+                "url": song["url"],
                 "duration": song["duration"],
                 "thumbnail": song.get("thumbnail", ""),
                 "channel": song.get("artist", ""),
@@ -376,7 +407,8 @@ async def _resolve_query(query: str, platform: str, msg: Message):
         if sc_path and sc_info:
             is_stream = bool(sc_info.get("_is_stream_url"))
             info = {
-                "title": song["title"], "url": song["url"],
+                "title": song["title"],
+                "url": song["url"],
                 "duration": song["duration"],
                 "thumbnail": song.get("thumbnail", ""),
                 "channel": song.get("artist", ""),
@@ -399,15 +431,20 @@ async def _resolve_query(query: str, platform: str, msg: Message):
                 info = {**yt, "platform": "apple_music"}
                 return info, media_path, is_stream
         # ── YouTube yt-dlp search+download as second YT-path ──
-        LOG.info("Apple Music -> YouTube search failed, trying yt-dlp: %s", track["query"])
+        LOG.info(
+            "Apple Music -> YouTube search failed, trying yt-dlp: %s", track["query"]
+        )
         filepath, dl_info = await search_and_download_audio(track["query"])
         if filepath and dl_info:
             return dl_info, filepath, False
         # ── JioSaavn fallback ──
-        LOG.info("Apple Music -> YouTube all failed, trying JioSaavn for: %s", track["query"])
+        LOG.info(
+            "Apple Music -> YouTube all failed, trying JioSaavn for: %s", track["query"]
+        )
         js_path, js_info = await search_and_download_jiosaavn(track["query"])
         if js_path and js_info:
             import os as _os
+
             if _os.path.isfile(js_path):
                 info = {
                     "title": js_info.get("title", track.get("title", "Unknown")),
@@ -438,13 +475,20 @@ async def _resolve_query(query: str, platform: str, msg: Message):
     if platform == "soundcloud":
         sc_info = await get_soundcloud_info(query)
         if not sc_info:
-            sc_info = {"title": "SoundCloud Audio", "url": query,
-                       "duration": 0, "thumbnail": "", "channel": "",
-                       "platform": "soundcloud"}
-        if sc_info.get("duration", 0) > Config.DURATION_LIMIT_MIN * 60 and sc_info["duration"] > 0:
+            sc_info = {
+                "title": "SoundCloud Audio",
+                "url": query,
+                "duration": 0,
+                "thumbnail": "",
+                "channel": "",
+                "platform": "soundcloud",
+            }
+        if (
+            sc_info.get("duration", 0) > Config.DURATION_LIMIT_MIN * 60
+            and sc_info["duration"] > 0
+        ):
             raise ValueError(
-                f"গানটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি, "
-                "play করা যাবে না।"
+                f"গানটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি, play করা যাবে না।"
             )
         # Try downloading first
         filepath = await download_soundcloud(query)
@@ -460,8 +504,13 @@ async def _resolve_query(query: str, platform: str, msg: Message):
     if platform == "direct_url":
         info = await get_video_info(query)
         if not info:
-            info = {"title": "Direct Stream", "url": query,
-                    "duration": 0, "thumbnail": "", "channel": ""}
+            info = {
+                "title": "Direct Stream",
+                "url": query,
+                "duration": 0,
+                "thumbnail": "",
+                "channel": "",
+            }
         media_path, is_stream = await _get_audio_media(query)
         if not media_path:
             raise ValueError("URL থেকে audio পাওয়া যায়নি।")
@@ -504,8 +553,11 @@ async def _resolve_query(query: str, platform: str, msg: Message):
                 if dl_info and not _duration_ok(dl_info.get("duration", 0)):
                     return ("__duration_exceeded__", dl_info["duration"], None)
                 info = dl_info or {
-                    "title": "Unknown", "url": "", "duration": 0,
-                    "thumbnail": "", "channel": "",
+                    "title": "Unknown",
+                    "url": "",
+                    "duration": 0,
+                    "thumbnail": "",
+                    "channel": "",
                 }
                 return info, fp, False
         except Exception as e:
@@ -562,31 +614,50 @@ async def _resolve_query(query: str, platform: str, msg: Message):
             LOG.debug("soundcloud failed: %s", e)
         return None
 
-    LOG.info("Audio query: YouTube-first sequential search for: %s", query)
+    LOG.info("Audio query: concurrent search for fastest results: %s", query)
 
-    # Try platforms in strict priority order. Stop at the first usable hit.
-    for tag, fn in (
-        ("youtube_url", _try_youtube_url),
-        ("youtube_dl", _try_youtube_download),
-        ("jiosaavn", _try_jiosaavn),
-        ("soundcloud", _try_soundcloud),
-    ):
-        try:
-            result = await fn()
-        except Exception:
-            result = None
-        if not result:
-            continue
-        if isinstance(result, tuple) and result and result[0] == "__duration_exceeded__":
-            duration_exceeded = result[1]
-            continue
-        LOG.info("Audio query WON by %s for: %s", tag, query)
-        return result
+    # Run all platforms concurrently. First successful result wins.
+    tasks = {
+        _aio.create_task(_try_youtube_url()): "youtube_url",
+        _aio.create_task(_try_youtube_download()): "youtube_dl",
+        _aio.create_task(_try_jiosaavn()): "jiosaavn",
+        _aio.create_task(_try_soundcloud()): "soundcloud",
+    }
+
+    pending = set(tasks.keys())
+    winner_result = None
+    winner_tag = None
+
+    while pending:
+        done, pending = await _aio.wait(pending, return_when=_aio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                result = task.result()
+                if result:
+                    if (
+                        isinstance(result, tuple)
+                        and result
+                        and result[0] == "__duration_exceeded__"
+                    ):
+                        duration_exceeded = result[1]
+                        continue
+                    winner_result = result
+                    winner_tag = tasks[task]
+                    # Cancel remaining tasks to save resources
+                    for p in pending:
+                        p.cancel()
+                    pending = set()
+                    break
+            except Exception:
+                pass
+
+    if winner_result:
+        LOG.info("Audio query WON by %s for: %s", winner_tag, query)
+        return winner_result
 
     if duration_exceeded:
         raise ValueError(
-            f"গানটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি, "
-            "play করা যাবে না।"
+            f"গানটি {Config.DURATION_LIMIT_MIN} মিনিটের বেশি, play করা যাবে না।"
         )
 
     raise ValueError("কোনো result পাওয়া যায়নি। অন্য keyword দিয়ে চেষ্টা করুন।")
@@ -704,17 +775,19 @@ async def play_command(client: Client, message: Message):
     # Start streaming
     try:
         await stream_audio(
-            chat_id, media_path,
-            title=title, duration=duration,
-            thumbnail=thumbnail, requester=requester,
+            chat_id,
+            media_path,
+            title=title,
+            duration=duration,
+            thumbnail=thumbnail,
+            requester=requester,
             skip_url_check=True,  # URL was just resolved, no need for HEAD probe
         )
     except FileNotFoundError:
         LOG.exception("Media not found for stream in %s", chat_id)
         await _safe_edit(
             status_msg,
-            "❌ মিডিয়া ফাইল/URL পাওয়া যায়নি।\n"
-            "আবার `/play` দিয়ে চেষ্টা করুন।",
+            "❌ মিডিয়া ফাইল/URL পাওয়া যায়নি।\nআবার `/play` দিয়ে চেষ্টা করুন।",
         )
         try:
             await leave_voice_chat(chat_id)
@@ -724,8 +797,7 @@ async def play_command(client: Client, message: Message):
     except RuntimeError as exc:
         await _safe_edit(
             status_msg,
-            f"❌ {exc}\n\n"
-            "STRING_SESSION সেট করা আছে কিনা চেক করুন।",
+            f"❌ {exc}\n\nSTRING_SESSION সেট করা আছে কিনা চেক করুন।",
         )
         try:
             await leave_voice_chat(chat_id)
@@ -817,6 +889,7 @@ async def play_command(client: Client, message: Message):
             await _add_reaction(chat_id, message.id)
         except Exception:
             pass
+
 
 @bot.on_message(filters.command(["playforce", "pf", "forceplay"]) & not_edited)
 async def playforce_command(client: Client, message: Message):
@@ -924,16 +997,18 @@ async def playforce_command(client: Client, message: Message):
     # Start streaming
     try:
         await stream_audio(
-            chat_id, media_path,
-            title=title, duration=duration,
-            thumbnail=thumbnail, requester=requester,
+            chat_id,
+            media_path,
+            title=title,
+            duration=duration,
+            thumbnail=thumbnail,
+            requester=requester,
             skip_url_check=True,  # URL was just resolved, no need for HEAD probe
         )
     except FileNotFoundError:
         await _safe_edit(
             status_msg,
-            "❌ মিডিয়া ফাইল/URL পাওয়া যায়নি।\n"
-            "আবার `/playforce` দিয়ে চেষ্টা করুন।",
+            "❌ মিডিয়া ফাইল/URL পাওয়া যায়নি।\nআবার `/playforce` দিয়ে চেষ্টা করুন।",
         )
         try:
             await leave_voice_chat(chat_id)
@@ -1016,7 +1091,9 @@ async def playforce_command(client: Client, message: Message):
                 await _add_now_playing(chat_id, new_msg)
             await _add_reaction(chat_id, message.id)
     except Exception as outer_exc:
-        LOG.warning("playforce now-playing render failed for %s: %s", chat_id, outer_exc)
+        LOG.warning(
+            "playforce now-playing render failed for %s: %s", chat_id, outer_exc
+        )
         try:
             new_msg = await bot.send_message(
                 chat_id,

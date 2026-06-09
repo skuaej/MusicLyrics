@@ -29,6 +29,7 @@ def _assistant_for_chat(chat_id: int):
         return userbot, pytgcalls
     return ub, ptc
 
+
 from MusicLyrics.plugins.play.queue import (
     get_current,
     skip_queue,
@@ -85,7 +86,7 @@ _central_progress_task: Optional[asyncio.Task] = None
 # (re)bind the audio stream, making the first track audible.
 _warmed_up_chats: set[int] = set()
 
-PROGRESS_INTERVAL_SEC = 30  # Update the "now playing" progress every 30 seconds (was 5).
+PROGRESS_INTERVAL_SEC = 5  # Update the "now playing" progress every 5 seconds.
 PROGRESS_PER_TICK_CAP = 30  # Max edits per tick to avoid burst FLOOD (was 50).
 
 # Track which platform last succeeded for each chat — prioritize it next time
@@ -163,7 +164,8 @@ async def _remove_now_playing(chat_id: int, msg_id: int) -> None:
     async with _NPM_LOCK:
         if chat_id in _now_playing_messages:
             _now_playing_messages[chat_id] = [
-                m for m in _now_playing_messages[chat_id]
+                m
+                for m in _now_playing_messages[chat_id]
                 if getattr(m, "id", None) != msg_id
             ]
             if not _now_playing_messages[chat_id]:
@@ -254,9 +256,11 @@ async def acquire_skip_lock(chat_id: int, timeout: float = 15.0) -> asyncio.Lock
         LOG.warning(
             "acquire_skip_lock: lock for %s busy > %.1fs — refusing to "
             "force-replace (would race in-flight play()).",
-            chat_id, timeout,
+            chat_id,
+            timeout,
         )
         raise RuntimeError(f"skip_lock timeout in chat {chat_id}")
+
 
 async def pre_join_vc(chat_id: int) -> None:
     """Pre-join the voice chat so streaming can start instantly.
@@ -296,10 +300,15 @@ async def pre_join_vc(chat_id: int) -> None:
             me = await asyncio.wait_for(ub.get_me(), timeout=3.0)
             try:
                 member = await asyncio.wait_for(
-                    bot.get_chat_member(chat_id, me.id), timeout=2.5,
+                    bot.get_chat_member(chat_id, me.id),
+                    timeout=2.5,
                 )
-                if member and getattr(member, "status", None) and \
-                        str(member.status).split(".")[-1].lower() not in ("left", "kicked", "banned", "restricted"):
+                if (
+                    member
+                    and getattr(member, "status", None)
+                    and str(member.status).split(".")[-1].lower()
+                    not in ("left", "kicked", "banned", "restricted")
+                ):
                     LOG.debug("Pre-join: Assistant already in group %s", chat_id)
                     return
             except Exception:
@@ -314,7 +323,8 @@ async def pre_join_vc(chat_id: int) -> None:
 
         async def _m_invite():
             invite_link = await asyncio.wait_for(
-                bot.export_chat_invite_link(chat_id), timeout=3.0,
+                bot.export_chat_invite_link(chat_id),
+                timeout=3.0,
             )
             if not invite_link:
                 raise RuntimeError("no invite link")
@@ -324,7 +334,9 @@ async def pre_join_vc(chat_id: int) -> None:
         async def _m_fresh_invite():
             new_link = await asyncio.wait_for(
                 bot.create_chat_invite_link(
-                    chat_id, name="Assistant Auto-Join", member_limit=1,
+                    chat_id,
+                    name="Assistant Auto-Join",
+                    member_limit=1,
                 ),
                 timeout=3.0,
             )
@@ -337,7 +349,8 @@ async def pre_join_vc(chat_id: int) -> None:
             finally:
                 try:
                     await asyncio.wait_for(
-                        bot.revoke_chat_invite_link(chat_id, link), timeout=2.0,
+                        bot.revoke_chat_invite_link(chat_id, link),
+                        timeout=2.0,
                     )
                 except Exception:
                     pass
@@ -349,7 +362,8 @@ async def pre_join_vc(chat_id: int) -> None:
             else:
                 uid = me.id
             await asyncio.wait_for(
-                bot.add_chat_members(chat_id, uid), timeout=4.0,
+                bot.add_chat_members(chat_id, uid),
+                timeout=4.0,
             )
             return "add_chat_members"
 
@@ -365,7 +379,8 @@ async def pre_join_vc(chat_id: int) -> None:
         try:
             while pending:
                 done, pending = await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_COMPLETED,
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
                 for t in done:
                     try:
@@ -391,7 +406,8 @@ async def pre_join_vc(chat_id: int) -> None:
             LOG.warning(
                 "Pre-join: All parallel methods failed for %s (errors=%s) — "
                 "will retry inside _do_play",
-                chat_id, "; ".join(last_errors[:4]) or "none",
+                chat_id,
+                "; ".join(last_errors[:4]) or "none",
             )
 
     except Exception as e:
@@ -412,13 +428,20 @@ AudioQuality = None
 VideoQuality = None
 
 try:
-    from pytgcalls.types import MediaStream as _MS, AudioQuality as _AQ, VideoQuality as _VQ
+    from pytgcalls.types import (
+        MediaStream as _MS,
+        AudioQuality as _AQ,
+        VideoQuality as _VQ,
+    )
+
     MediaStream = _MS
     AudioQuality = _AQ
     VideoQuality = _VQ
     _HAS_MEDIA_STREAM = True
 except ImportError:
-    LOG.warning("Could not import MediaStream/AudioQuality/VideoQuality from pytgcalls.types")
+    LOG.warning(
+        "Could not import MediaStream/AudioQuality/VideoQuality from pytgcalls.types"
+    )
 
 # Check for Flags support (py-tgcalls >= 2.1)
 if _HAS_MEDIA_STREAM:
@@ -432,6 +455,7 @@ if _HAS_MEDIA_STREAM:
 # Check for GroupCallConfig
 try:
     from pytgcalls.types import GroupCallConfig
+
     _HAS_GROUP_CALL_CONFIG = True
 except ImportError:
     GroupCallConfig = None
@@ -439,6 +463,7 @@ except ImportError:
 
 try:
     from pytgcalls.types.stream import StreamAudioEnded
+
     _STREAM_END_TYPE = StreamAudioEnded
 except ImportError:
     _STREAM_END_TYPE = None
@@ -455,6 +480,7 @@ async def _add_reaction(chat_id: int, message_id: int) -> None:
     ReactionTypeEmoji.  Uses a large pool of trending emojis.
     """
     import random as _rand
+
     _react_pool = [
         "\U0001f44d",  # 👍
         "\u2764\ufe0f",  # ❤️
@@ -465,7 +491,7 @@ async def _add_reaction(chat_id: int, message_id: int) -> None:
         "\U0001f44f",  # 👏
         "\U0001f970",  # 🥰
         "\U0001f4af",  # 💯
-        "\u26a1",      # ⚡
+        "\u26a1",  # ⚡
         "\U0001f3c6",  # 🏆
         "\U0001f601",  # 😁
         "\U0001f923",  # 🤣
@@ -512,7 +538,10 @@ async def _add_reaction(chat_id: int, message_id: int) -> None:
                 # Last resort: try with ReactionTypeEmoji if available
                 try:
                     from pyrogram.types import ReactionTypeEmoji
-                    await bot.send_reaction(chat_id, message_id, emoji=[ReactionTypeEmoji(emoji=emoji)])
+
+                    await bot.send_reaction(
+                        chat_id, message_id, emoji=[ReactionTypeEmoji(emoji=emoji)]
+                    )
                 except ImportError:
                     pass
             return  # Success, stop trying
@@ -525,45 +554,93 @@ async def _add_reaction(chat_id: int, message_id: int) -> None:
 # every 30 seconds creating a "moving" animation effect.
 _BUTTON_THEMES = [
     {
-        "resume": "🌙", "mute": "🔇", "song": "🎵", "skip": "🎶",
-        "yorsa": "🎶", "home": "🔮", "close": "🌙",
-        "bar_left": "🐻", "bar_dot": "🍃",
-        "header": "🎧", "title_icon": "🎵", "dur_icon": "⏱",
+        "resume": "🌙",
+        "mute": "🔇",
+        "song": "🎵",
+        "skip": "🎶",
+        "yorsa": "🎶",
+        "home": "🔮",
+        "close": "🌙",
+        "bar_left": "🐻",
+        "bar_dot": "🍃",
+        "header": "🎧",
+        "title_icon": "🎵",
+        "dur_icon": "⏱",
         "label": "Theme 1",
     },
     {
-        "resume": "🦋", "mute": "🔕", "song": "🎧", "skip": "🎼",
-        "yorsa": "🦋", "home": "🌍", "close": "🦋",
-        "bar_left": "🦊", "bar_dot": "🔥",
-        "header": "🔥", "title_icon": "🎧", "dur_icon": "⌛",
+        "resume": "🦋",
+        "mute": "🔕",
+        "song": "🎧",
+        "skip": "🎼",
+        "yorsa": "🦋",
+        "home": "🌍",
+        "close": "🦋",
+        "bar_left": "🦊",
+        "bar_dot": "🔥",
+        "header": "🔥",
+        "title_icon": "🎧",
+        "dur_icon": "⌛",
         "label": "Theme 2",
     },
     {
-        "resume": "🌸", "mute": "🚫", "song": "🎹", "skip": "🎻",
-        "yorsa": "🌸", "home": "💎", "close": "🌸",
-        "bar_left": "🐱", "bar_dot": "⭐",
-        "header": "💫", "title_icon": "🎹", "dur_icon": "🕐",
+        "resume": "🌸",
+        "mute": "🚫",
+        "song": "🎹",
+        "skip": "🎻",
+        "yorsa": "🌸",
+        "home": "💎",
+        "close": "🌸",
+        "bar_left": "🐱",
+        "bar_dot": "⭐",
+        "header": "💫",
+        "title_icon": "🎹",
+        "dur_icon": "🕐",
         "label": "Theme 3",
     },
     {
-        "resume": "🔮", "mute": "🔈", "song": "🎺", "skip": "🎷",
-        "yorsa": "🔮", "home": "🌟", "close": "🔮",
-        "bar_left": "🐼", "bar_dot": "💫",
-        "header": "✨", "title_icon": "🎺", "dur_icon": "⏰",
+        "resume": "🔮",
+        "mute": "🔈",
+        "song": "🎺",
+        "skip": "🎷",
+        "yorsa": "🔮",
+        "home": "🌟",
+        "close": "🔮",
+        "bar_left": "🐼",
+        "bar_dot": "💫",
+        "header": "✨",
+        "title_icon": "🎺",
+        "dur_icon": "⏰",
         "label": "Theme 4",
     },
     {
-        "resume": "🌊", "mute": "🔕", "song": "🎻", "skip": "🎶",
-        "yorsa": "🌊", "home": "🏠", "close": "🌊",
-        "bar_left": "🐬", "bar_dot": "🌟",
-        "header": "🌈", "title_icon": "🎻", "dur_icon": "⏳",
+        "resume": "🌊",
+        "mute": "🔕",
+        "song": "🎻",
+        "skip": "🎶",
+        "yorsa": "🌊",
+        "home": "🏠",
+        "close": "🌊",
+        "bar_left": "🐬",
+        "bar_dot": "🌟",
+        "header": "🌈",
+        "title_icon": "🎻",
+        "dur_icon": "⏳",
         "label": "Theme 5",
     },
     {
-        "resume": "🍀", "mute": "🔇", "song": "🎤", "skip": "🎵",
-        "yorsa": "🍀", "home": "💝", "close": "🍀",
-        "bar_left": "🐢", "bar_dot": "🌺",
-        "header": "🎊", "title_icon": "🎤", "dur_icon": "🕰",
+        "resume": "🍀",
+        "mute": "🔇",
+        "song": "🎤",
+        "skip": "🎵",
+        "yorsa": "🍀",
+        "home": "💝",
+        "close": "🍀",
+        "bar_left": "🐢",
+        "bar_dot": "🌺",
+        "header": "🎊",
+        "title_icon": "🎤",
+        "dur_icon": "🕰",
         "label": "Theme 6",
     },
 ]
@@ -594,7 +671,9 @@ def _control_keyboard(color: str = "") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(f"{t['resume']} Resume", callback_data="ctl_resume"),
+                InlineKeyboardButton(
+                    f"{t['resume']} Resume", callback_data="ctl_resume"
+                ),
                 InlineKeyboardButton(f"{t['mute']} Pause", callback_data="ctl_pause"),
                 InlineKeyboardButton(f"{t['song']} Queue", callback_data="ctl_queue"),
                 InlineKeyboardButton(f"{t['skip']} Skip", callback_data="ctl_skip"),
@@ -633,7 +712,8 @@ def _queue_added_keyboard(color: str = "") -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(f"{t['song']} Queue", callback_data="ctl_queue"),
                 InlineKeyboardButton(
-                    f"{t['close']} Close", callback_data="ctl_stop",
+                    f"{t['close']} Close",
+                    callback_data="ctl_stop",
                 ),
             ],
         ]
@@ -674,6 +754,7 @@ async def _check_stream_url(url: str) -> bool:
         return True  # Not a URL, skip check
     try:
         import aiohttp
+
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.head(
@@ -683,7 +764,9 @@ async def _check_stream_url(url: str) -> bool:
                 ) as resp:
                     if resp.status < 400:
                         return True
-                    LOG.warning("Stream URL failed (HTTP %d): %s", resp.status, url[:80])
+                    LOG.warning(
+                        "Stream URL failed (HTTP %d): %s", resp.status, url[:80]
+                    )
                     return False
             except asyncio.TimeoutError:
                 # On timeout, assume URL is OK — slow CDN, let py-tgcalls try
@@ -757,7 +840,8 @@ def _make_audio_stream(media_path: str):
             )
         except (AttributeError, TypeError) as e:
             LOG.debug(
-                "MediaStream with REQUIRED audio + IGNORE video failed: %s", e,
+                "MediaStream with REQUIRED audio + IGNORE video failed: %s",
+                e,
             )
         # Older py-tgcalls builds may not accept audio_flags — fall back
         # to mirroring the /vplay SDP shape (audio + video direction) so
@@ -771,7 +855,8 @@ def _make_audio_stream(media_path: str):
             )
         except (AttributeError, TypeError) as e:
             LOG.debug(
-                "MediaStream with AUTO_DETECT+video_parameters failed: %s", e,
+                "MediaStream with AUTO_DETECT+video_parameters failed: %s",
+                e,
             )
         # If the build doesn't accept video_parameters for an audio-only
         # path, fall back to AUTO_DETECT alone — still safe because
@@ -840,7 +925,9 @@ async def _ensure_in_vc(chat_id: int):
     """
     ub, ptc = _assistant_for_chat(chat_id)
     if ptc is None:
-        raise RuntimeError("Music streaming is disabled -- STRING_SESSION not configured.")
+        raise RuntimeError(
+            "Music streaming is disabled -- STRING_SESSION not configured."
+        )
 
     # Check if already in a call for this chat
     try:
@@ -925,13 +1012,19 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
                     cycles_done += 1
                     LOG.debug(
                         "First-play warm-up cycle %d via %s/%s for %s",
-                        cycles_done, pause_name, resume_name, chat_id,
+                        cycles_done,
+                        pause_name,
+                        resume_name,
+                        chat_id,
                     )
                     break
                 except Exception as inner_exc:
                     LOG.debug(
                         "First-play warm-up attempt %s/%s failed for %s: %s",
-                        pause_name, resume_name, chat_id, inner_exc,
+                        pause_name,
+                        resume_name,
+                        chat_id,
+                        inner_exc,
                     )
             if not cycle_ok:
                 # If no pause/resume API is even callable, no point looping.
@@ -941,11 +1034,15 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
             _warmed_up_chats.add(chat_id)
             LOG.info(
                 "First-play audio warm-up completed for %s (%d cycle%s)",
-                chat_id, cycles_done, "" if cycles_done == 1 else "s",
+                chat_id,
+                cycles_done,
+                "" if cycles_done == 1 else "s",
             )
             return
 
-        LOG.debug("First-play warm-up not available for %s: no pause/resume API", chat_id)
+        LOG.debug(
+            "First-play warm-up not available for %s: no pause/resume API", chat_id
+        )
     except Exception as e:
         # Warm-up is best-effort: even if it fails the original play()
         # is still running, so we never want to break playback here.
@@ -999,7 +1096,9 @@ async def _do_play_locked(chat_id: int, stream):
     """
     _, ptc = _assistant_for_chat(chat_id)
     if ptc is None:
-        raise RuntimeError("Music streaming is disabled -- STRING_SESSION not configured.")
+        raise RuntimeError(
+            "Music streaming is disabled -- STRING_SESSION not configured."
+        )
 
     # Ensure the assistant is actually in the group/VC before issuing play().
     try:
@@ -1045,7 +1144,9 @@ async def _do_play_locked(chat_id: int, stream):
                 LOG.info("_reset_call_state: %s succeeded for %s", method_name, chat_id)
                 return
             except Exception as e:
-                LOG.debug("_reset_call_state: %s failed for %s: %s", method_name, chat_id, e)
+                LOG.debug(
+                    "_reset_call_state: %s failed for %s: %s", method_name, chat_id, e
+                )
         # pytgcalls leaves failed — try raw API so we definitely leave.
         try:
             await _raw_leave_group_call(chat_id)
@@ -1107,13 +1208,15 @@ async def _do_play_locked(chat_id: int, stream):
 
             play_task.add_done_callback(_orphan_done)
             done, pending = await asyncio.wait(
-                [play_task], timeout=PLAY_METHOD_TIMEOUT,
+                [play_task],
+                timeout=PLAY_METHOD_TIMEOUT,
             )
             if play_task in pending:
                 _orphan_play_tasks[chat_id] = play_task
                 LOG.warning(
                     "play() taking >%.1fs for %s — proceeding without cancelling native call",
-                    PLAY_METHOD_TIMEOUT, chat_id,
+                    PLAY_METHOD_TIMEOUT,
+                    chat_id,
                 )
                 return False
             play_task.result()
@@ -1126,24 +1229,29 @@ async def _do_play_locked(chat_id: int, stream):
             try:
                 if await _play_and_wait(
                     ptc.play(
-                        chat_id, stream,
+                        chat_id,
+                        stream,
                         config=GroupCallConfig(auto_start=True),
                     ),
                     "play() with GroupCallConfig",
                 ):
                     return True
-                LOG.warning("play() with GroupCallConfig TIMED OUT for %s — aborting attempt", chat_id)
+                LOG.warning(
+                    "play() with GroupCallConfig TIMED OUT for %s — aborting attempt",
+                    chat_id,
+                )
                 return False
             except (TypeError, AttributeError) as e:
-                LOG.debug("play() with GroupCallConfig API mismatch: %s — trying plain play()", e)
+                LOG.debug(
+                    "play() with GroupCallConfig API mismatch: %s — trying plain play()",
+                    e,
+                )
             except Exception as e:
                 LOG.debug("play() with GroupCallConfig errored: %s", e)
 
         # Method 2: plain play() (py-tgcalls 2.2.x)
         try:
-            if await _play_and_wait(
-                ptc.play(chat_id, stream), "play()"
-            ):
+            if await _play_and_wait(ptc.play(chat_id, stream), "play()"):
                 return True
             LOG.warning("plain play() TIMED OUT for %s — aborting attempt", chat_id)
             return False
@@ -1151,7 +1259,7 @@ async def _do_play_locked(chat_id: int, stream):
             LOG.debug("play() failed: %s", e)
 
         # Method 3: explicit join_group_call (older py-tgcalls)
-        if hasattr(ptc, 'join_group_call'):
+        if hasattr(ptc, "join_group_call"):
             try:
                 if await _play_and_wait(
                     ptc.join_group_call(chat_id, stream), "join_group_call()"
@@ -1194,7 +1302,9 @@ async def _do_play_locked(chat_id: int, stream):
         return
 
     # Second attempt — reset call state first (handles wedged py-tgcalls)
-    LOG.info("First play attempt failed for %s — resetting call state and retrying", chat_id)
+    LOG.info(
+        "First play attempt failed for %s — resetting call state and retrying", chat_id
+    )
     # The previous (failed) attempt may have left chat_id in _warmed_up_chats
     # via a stale orphan_done callback. Clear it so the retry's warmup
     # actually runs on the new session.
@@ -1215,7 +1325,8 @@ async def _do_play_locked(chat_id: int, stream):
 
     async def _aj_invite():
         invite_link = await asyncio.wait_for(
-            bot.export_chat_invite_link(chat_id), timeout=3.0,
+            bot.export_chat_invite_link(chat_id),
+            timeout=3.0,
         )
         if not invite_link:
             raise RuntimeError("no invite link")
@@ -1225,7 +1336,9 @@ async def _do_play_locked(chat_id: int, stream):
     async def _aj_fresh():
         new_link = await asyncio.wait_for(
             bot.create_chat_invite_link(
-                chat_id, name="Auto-Join", member_limit=1,
+                chat_id,
+                name="Auto-Join",
+                member_limit=1,
             ),
             timeout=3.0,
         )
@@ -1238,7 +1351,8 @@ async def _do_play_locked(chat_id: int, stream):
         finally:
             try:
                 await asyncio.wait_for(
-                    bot.revoke_chat_invite_link(chat_id, link), timeout=2.0,
+                    bot.revoke_chat_invite_link(chat_id, link),
+                    timeout=2.0,
                 )
             except Exception:
                 pass
@@ -1246,7 +1360,8 @@ async def _do_play_locked(chat_id: int, stream):
     async def _aj_add():
         _me = await asyncio.wait_for(ub.get_me(), timeout=2.5)
         await asyncio.wait_for(
-            bot.add_chat_members(chat_id, _me.id), timeout=4.0,
+            bot.add_chat_members(chat_id, _me.id),
+            timeout=4.0,
         )
         return "add_chat_members"
 
@@ -1261,7 +1376,8 @@ async def _do_play_locked(chat_id: int, stream):
     try:
         while aj_pending:
             done, aj_pending = await asyncio.wait(
-                aj_pending, return_when=asyncio.FIRST_COMPLETED,
+                aj_pending,
+                return_when=asyncio.FIRST_COMPLETED,
             )
             for t in done:
                 try:
@@ -1307,6 +1423,7 @@ async def _do_play_locked(chat_id: int, stream):
 
 
 # ── Progress Timer ────────────────────────────────────────────────────────────
+
 
 def _format_progress(elapsed: int, total: int) -> str:
     """Format a decorated progress bar with animated emoji style."""
@@ -1365,7 +1482,7 @@ async def _central_progress_loop():
                     msgs = _now_playing_messages.get(chat_id) or []
                     if not msgs:
                         continue
-                    if time.time() - state.get("last_update", 0) < 15:
+                    if time.time() - state.get("last_update", 0) < 4:
                         continue
                     state["last_update"] = time.time()
                     current = await get_current(chat_id)
@@ -1376,16 +1493,21 @@ async def _central_progress_loop():
                     try:
                         if hasattr(last_msg, "photo") and last_msg.photo:
                             await last_msg.edit_caption(
-                                caption=text, reply_markup=_control_keyboard(),
+                                caption=text,
+                                reply_markup=_control_keyboard(),
                             )
                         else:
                             await last_msg.edit_text(
-                                text, reply_markup=_control_keyboard(),
+                                text,
+                                reply_markup=_control_keyboard(),
                             )
                         edited += 1
                     except Exception as e:
                         LOG.warning("Progress edit failed for %s: %s", chat_id, e)
-                        if "MESSAGE_ID_INVALID" in str(e) or "message not found" in str(e).lower():
+                        if (
+                            "MESSAGE_ID_INVALID" in str(e)
+                            or "message not found" in str(e).lower()
+                        ):
                             _progress_state.pop(chat_id, None)
                 except Exception as e:
                     LOG.debug("central progress tick failed for %s: %s", chat_id, e)
@@ -1418,10 +1540,13 @@ async def _stream_health_watchdog(chat_id: int):
             frozen_count += 1
             if frozen_count >= 2:
                 LOG.warning(
-                    "Stream frozen in %s (native pos stuck at %ds) — auto-next", chat_id, pos,
+                    "Stream frozen in %s (native pos stuck at %ds) — auto-next",
+                    chat_id,
+                    pos,
                 )
                 try:
                     from MusicLyrics.plugins.play.queue import skip_queue as _sq
+
                     nxt = await _sq(chat_id, force=True)
                     if nxt:
                         await _try_play_chain(chat_id, nxt)
@@ -1489,18 +1614,21 @@ def _cleanup_chat_state(chat_id: int) -> None:
     _progress_state.pop(chat_id, None)
     try:
         from MusicLyrics.utils.safe_send import clear_chat_state
+
         clear_chat_state(chat_id)
     except Exception:
         pass
     # Drop prefetch state (cancels any in-flight prefetch + drains it).
     try:
         from MusicLyrics.plugins.play.prefetch import clear_prefetch_state
+
         clear_prefetch_state(chat_id)
     except Exception:
         pass
 
 
 # -- Public API ---
+
 
 async def stream_audio(
     chat_id: int,
@@ -1521,19 +1649,27 @@ async def stream_audio(
     freshly-resolved / prefetched URLs to make /skip near-instant.
     """
     if pytgcalls is None:
-        raise RuntimeError("Music streaming is disabled -- STRING_SESSION not configured.")
+        raise RuntimeError(
+            "Music streaming is disabled -- STRING_SESSION not configured."
+        )
     _validate_media(media_path)
 
     # Pre-check stream URL validity to prevent ffprobe/JSONDecodeError crashes
     if _is_url(media_path) and not skip_url_check:
         url_ok = await _check_stream_url(media_path)
         if not url_ok:
-            LOG.warning("Stream URL pre-check failed in %s — trying download fallbacks concurrently", chat_id)
+            LOG.warning(
+                "Stream URL pre-check failed in %s — trying download fallbacks concurrently",
+                chat_id,
+            )
             if title:
                 # Run all fallbacks CONCURRENTLY — prefer downloads over stream URLs
                 async def _fb_youtube():
                     try:
-                        from MusicLyrics.plugins.play.platforms.youtube import search_and_download_audio
+                        from MusicLyrics.plugins.play.platforms.youtube import (
+                            search_and_download_audio,
+                        )
+
                         p, _ = await search_and_download_audio(title)
                         if p and os.path.isfile(str(p)):
                             return p
@@ -1553,7 +1689,10 @@ async def stream_audio(
                 async def _fb_soundcloud():
                     try:
                         p, info = await search_and_download_soundcloud(title)
-                        if p and (os.path.isfile(str(p)) or (info and info.get("_is_stream_url"))):
+                        if p and (
+                            os.path.isfile(str(p))
+                            or (info and info.get("_is_stream_url"))
+                        ):
                             return p
                     except Exception:
                         pass
@@ -1573,7 +1712,11 @@ async def stream_audio(
                             audio = _make_audio_stream(result)
                             await _do_play(chat_id, audio)
                             _active_chats.add(chat_id)
-                            LOG.info("Streaming audio (pre-check download recovery) in %s: %s", chat_id, title)
+                            LOG.info(
+                                "Streaming audio (pre-check download recovery) in %s: %s",
+                                chat_id,
+                                title,
+                            )
                             recovered = True
                             break
                         except Exception:
@@ -1581,26 +1724,35 @@ async def stream_audio(
                 # If no local file, try stream URL results
                 if not recovered:
                     for result in results:
-                        if isinstance(result, str) and result and not os.path.isfile(result):
+                        if (
+                            isinstance(result, str)
+                            and result
+                            and not os.path.isfile(result)
+                        ):
                             try:
                                 audio = _make_audio_stream(result)
                                 await _do_play(chat_id, audio)
                                 _active_chats.add(chat_id)
-                                LOG.info("Streaming audio (pre-check stream recovery) in %s: %s", chat_id, title)
+                                LOG.info(
+                                    "Streaming audio (pre-check stream recovery) in %s: %s",
+                                    chat_id,
+                                    title,
+                                )
                                 recovered = True
                                 break
                             except Exception:
                                 pass
                 if recovered:
                     return
-            raise FileNotFoundError(f"Stream URL expired and all fallbacks failed for: {title or media_path[:80]}")
+            raise FileNotFoundError(
+                f"Stream URL expired and all fallbacks failed for: {title or media_path[:80]}"
+            )
 
     try:
         audio = _make_audio_stream(media_path)
         await _do_play(chat_id, audio)
         _active_chats.add(chat_id)
-        LOG.info("Streaming audio in %s: %s (%s)",
-                 chat_id, title, media_path[:100])
+        LOG.info("Streaming audio in %s: %s (%s)", chat_id, title, media_path[:100])
         # Track which platform succeeded for auto-next priority
         if "soundcloud" in media_path.lower() or "sndcdn" in media_path.lower():
             _last_successful_platform[chat_id] = "soundcloud"
@@ -1616,12 +1768,17 @@ async def stream_audio(
         if _is_url(media_path) and title:
             LOG.warning(
                 "%s with stream URL in %s — trying all fallbacks concurrently...",
-                type(exc).__name__, chat_id,
+                type(exc).__name__,
+                chat_id,
             )
 
             async def _dl_youtube():
                 try:
-                    from MusicLyrics.plugins.play.platforms.youtube import download_audio, search_and_download_audio
+                    from MusicLyrics.plugins.play.platforms.youtube import (
+                        download_audio,
+                        search_and_download_audio,
+                    )
+
                     # Try direct URL download first
                     try:
                         lp = await download_audio(media_path)
@@ -1650,7 +1807,9 @@ async def stream_audio(
                 try:
                     p, info = await search_and_download_soundcloud(title)
                     if p:
-                        if (info and info.get("_is_stream_url")) or os.path.isfile(str(p)):
+                        if (info and info.get("_is_stream_url")) or os.path.isfile(
+                            str(p)
+                        ):
                             return p
                 except Exception:
                     pass
@@ -1664,7 +1823,9 @@ async def stream_audio(
             fb_pending = set(fb_tasks)
             fb_recovered = False
             while fb_pending:
-                fb_done, fb_pending = await asyncio.wait(fb_pending, return_when=asyncio.FIRST_COMPLETED)
+                fb_done, fb_pending = await asyncio.wait(
+                    fb_pending, return_when=asyncio.FIRST_COMPLETED
+                )
                 for task in fb_done:
                     try:
                         local_path = task.result()
@@ -1674,7 +1835,11 @@ async def stream_audio(
                             audio = _make_audio_stream(local_path)
                             await _do_play(chat_id, audio)
                             _active_chats.add(chat_id)
-                            LOG.info("Streaming audio (concurrent fallback) in %s: %s", chat_id, title)
+                            LOG.info(
+                                "Streaming audio (concurrent fallback) in %s: %s",
+                                chat_id,
+                                title,
+                            )
                             fb_recovered = True
                             fb_pending = set()
                             break
@@ -1706,16 +1871,25 @@ async def stream_video(
     freshly-resolved / prefetched URLs to make /skip near-instant.
     """
     if pytgcalls is None:
-        raise RuntimeError("Music streaming is disabled -- STRING_SESSION not configured.")
+        raise RuntimeError(
+            "Music streaming is disabled -- STRING_SESSION not configured."
+        )
     _validate_media(media_path)
 
     # Pre-check stream URL validity to prevent ffprobe/JSONDecodeError crashes
     if _is_url(media_path) and not skip_url_check:
         url_ok = await _check_stream_url(media_path)
         if not url_ok:
-            LOG.warning("Video stream URL pre-check failed in %s — going directly to fallback", chat_id)
+            LOG.warning(
+                "Video stream URL pre-check failed in %s — going directly to fallback",
+                chat_id,
+            )
             try:
-                from MusicLyrics.plugins.play.platforms.youtube import download_video, search_and_download_video
+                from MusicLyrics.plugins.play.platforms.youtube import (
+                    download_video,
+                    search_and_download_video,
+                )
+
                 local_path = None
                 if title:
                     local_path, _ = await search_and_download_video(title)
@@ -1723,30 +1897,44 @@ async def stream_video(
                     stream = _make_video_stream(local_path)
                     await _do_play(chat_id, stream)
                     _active_chats.add(chat_id)
-                    LOG.info("Streaming video (URL pre-check recovery) in %s: %s", chat_id, title)
+                    LOG.info(
+                        "Streaming video (URL pre-check recovery) in %s: %s",
+                        chat_id,
+                        title,
+                    )
                     return
             except Exception:
-                LOG.debug("Video URL pre-check recovery download failed for %s", chat_id)
+                LOG.debug(
+                    "Video URL pre-check recovery download failed for %s", chat_id
+                )
             # Try SoundCloud
             if title:
                 try:
                     sc_path, sc_info = await search_and_download_soundcloud(title)
-                    if sc_path and (os.path.isfile(str(sc_path)) or (sc_info and sc_info.get("_is_stream_url"))):
+                    if sc_path and (
+                        os.path.isfile(str(sc_path))
+                        or (sc_info and sc_info.get("_is_stream_url"))
+                    ):
                         stream = _make_audio_stream(sc_path)
                         await _do_play(chat_id, stream)
                         _active_chats.add(chat_id)
-                        LOG.info("Streaming audio via SoundCloud (video pre-check recovery) in %s: %s", chat_id, title)
+                        LOG.info(
+                            "Streaming audio via SoundCloud (video pre-check recovery) in %s: %s",
+                            chat_id,
+                            title,
+                        )
                         return
                 except Exception:
                     pass
-            raise FileNotFoundError(f"Video stream URL expired and all fallbacks failed for: {title or media_path[:80]}")
+            raise FileNotFoundError(
+                f"Video stream URL expired and all fallbacks failed for: {title or media_path[:80]}"
+            )
 
     try:
         stream = _make_video_stream(media_path)
         await _do_play(chat_id, stream)
         _active_chats.add(chat_id)
-        LOG.info("Streaming video in %s: %s (%s)",
-                 chat_id, title, media_path[:100])
+        LOG.info("Streaming video in %s: %s (%s)", chat_id, title, media_path[:100])
         # Kick off prefetch for the NEXT queue item — makes skip/auto-next instant
         try:
             asyncio.create_task(prefetch_next(chat_id))
@@ -1757,31 +1945,47 @@ async def stream_video(
         if _is_url(media_path):
             LOG.warning(
                 "%s with video stream URL in %s — downloading file and retrying...",
-                type(exc).__name__, chat_id,
+                type(exc).__name__,
+                chat_id,
             )
             try:
-                from MusicLyrics.plugins.play.platforms.youtube import download_video, search_and_download_video
+                from MusicLyrics.plugins.play.platforms.youtube import (
+                    download_video,
+                    search_and_download_video,
+                )
+
                 local_path = await download_video(media_path)
                 if not local_path or not os.path.isfile(str(local_path)):
                     # URL download failed, try search+download with title
                     if title:
-                        LOG.info("Video URL download failed, trying search+download for: %s", title)
+                        LOG.info(
+                            "Video URL download failed, trying search+download for: %s",
+                            title,
+                        )
                         local_path, _ = await search_and_download_video(title)
                 if local_path and os.path.isfile(str(local_path)):
                     stream = _make_video_stream(local_path)
                     await _do_play(chat_id, stream)
                     _active_chats.add(chat_id)
-                    LOG.info("Streaming video (downloaded) in %s: %s (%s)",
-                             chat_id, title, str(local_path)[:100])
+                    LOG.info(
+                        "Streaming video (downloaded) in %s: %s (%s)",
+                        chat_id,
+                        title,
+                        str(local_path)[:100],
+                    )
                     return
             except Exception as dl_exc:
-                LOG.exception("Video download fallback also failed in %s: %s",
-                             chat_id, dl_exc)
+                LOG.exception(
+                    "Video download fallback also failed in %s: %s", chat_id, dl_exc
+                )
 
             # LAST RESORT: SoundCloud fallback for video too (plays audio)
             if title:
                 try:
-                    LOG.info("All video methods failed, trying SoundCloud fallback for: %s", title)
+                    LOG.info(
+                        "All video methods failed, trying SoundCloud fallback for: %s",
+                        title,
+                    )
                     sc_path, sc_info = await search_and_download_soundcloud(title)
                     if sc_path:
                         if sc_info and sc_info.get("_is_stream_url"):
@@ -1793,12 +1997,19 @@ async def stream_video(
                         if stream:
                             await _do_play(chat_id, stream)
                             _active_chats.add(chat_id)
-                            LOG.info("Streaming audio via SoundCloud (video fallback) in %s: %s (%s)",
-                                     chat_id, title, str(sc_path)[:100])
+                            LOG.info(
+                                "Streaming audio via SoundCloud (video fallback) in %s: %s (%s)",
+                                chat_id,
+                                title,
+                                str(sc_path)[:100],
+                            )
                             return
                 except Exception as sc_exc:
-                    LOG.exception("SoundCloud video fallback also failed in %s: %s",
-                                 chat_id, sc_exc)
+                    LOG.exception(
+                        "SoundCloud video fallback also failed in %s: %s",
+                        chat_id,
+                        sc_exc,
+                    )
 
         LOG.exception("Failed to stream video in %s: %s", chat_id, exc)
         raise
@@ -1812,7 +2023,9 @@ async def stream_audio_with_image(
 ) -> None:
     """Stream audio with a static thumbnail image in video chat."""
     if pytgcalls is None:
-        raise RuntimeError("Music streaming is disabled -- STRING_SESSION not configured.")
+        raise RuntimeError(
+            "Music streaming is disabled -- STRING_SESSION not configured."
+        )
     _validate_media(file_path)
     try:
         stream = _make_audio_stream(file_path)
@@ -1827,7 +2040,7 @@ async def stream_audio_with_image(
 async def pause_stream(chat_id: int) -> bool:
     try:
         # py-tgcalls 2.2.x uses pause(), older uses pause_stream()
-        if hasattr(pytgcalls, 'pause'):
+        if hasattr(pytgcalls, "pause"):
             await pytgcalls.pause(chat_id)
         else:
             await pytgcalls.pause_stream(chat_id)
@@ -1840,7 +2053,7 @@ async def pause_stream(chat_id: int) -> bool:
 async def resume_stream(chat_id: int) -> bool:
     try:
         # py-tgcalls 2.2.x uses resume(), older uses resume_stream()
-        if hasattr(pytgcalls, 'resume'):
+        if hasattr(pytgcalls, "resume"):
             await pytgcalls.resume(chat_id)
         else:
             await pytgcalls.resume_stream(chat_id)
@@ -1865,7 +2078,7 @@ async def set_volume(chat_id: int, volume: int) -> bool:
     volume = max(1, min(200, volume))
     try:
         # py-tgcalls 2.2.x uses change_volume_call(), older uses change_volume()
-        if hasattr(pytgcalls, 'change_volume_call'):
+        if hasattr(pytgcalls, "change_volume_call"):
             await pytgcalls.change_volume_call(chat_id, volume)
         else:
             await pytgcalls.change_volume(chat_id, volume)
@@ -1903,16 +2116,12 @@ async def _raw_leave_group_call(chat_id: int) -> bool:
     input_call = None
     try:
         if hasattr(peer, "channel_id"):
-            full = await ub.invoke(
-                functions.channels.GetFullChannel(channel=peer)
-            )
+            full = await ub.invoke(functions.channels.GetFullChannel(channel=peer))
             call = getattr(full.full_chat, "call", None)
             if call is not None:
                 input_call = call
         else:
-            full = await ub.invoke(
-                functions.messages.GetFullChat(chat_id=peer.chat_id)
-            )
+            full = await ub.invoke(functions.messages.GetFullChat(chat_id=peer.chat_id))
             call = getattr(full.full_chat, "call", None)
             if call is not None:
                 input_call = call
@@ -1927,9 +2136,7 @@ async def _raw_leave_group_call(chat_id: int) -> bool:
 
     try:
         await asyncio.wait_for(
-            ub.invoke(
-                functions.phone.LeaveGroupCall(call=input_call, source=0)
-            ),
+            ub.invoke(functions.phone.LeaveGroupCall(call=input_call, source=0)),
             timeout=5.0,
         )
         LOG.info("raw_leave: phone.LeaveGroupCall succeeded for %s", chat_id)
@@ -1970,10 +2177,16 @@ async def _background_ensure_left(chat_id: int, attempts: int = 6) -> None:
         except Exception:
             pass
         if not still_in and not await _raw_leave_check(chat_id):
-            LOG.info("background_ensure_left: %s confirmed out (attempt %d)", chat_id, i + 1)
+            LOG.info(
+                "background_ensure_left: %s confirmed out (attempt %d)", chat_id, i + 1
+            )
             return
-        LOG.info("background_ensure_left: %s still in VC — retry %d/%d",
-                 chat_id, i + 1, attempts)
+        LOG.info(
+            "background_ensure_left: %s still in VC — retry %d/%d",
+            chat_id,
+            i + 1,
+            attempts,
+        )
         if ptc is not None:
             for method_name in ("leave_call", "leave_group_call"):
                 fn = getattr(ptc, method_name, None)
@@ -1981,7 +2194,11 @@ async def _background_ensure_left(chat_id: int, attempts: int = 6) -> None:
                     continue
                 try:
                     await asyncio.wait_for(fn(chat_id), timeout=4.0)
-                    LOG.info("background_ensure_left: %s succeeded via %s", chat_id, method_name)
+                    LOG.info(
+                        "background_ensure_left: %s succeeded via %s",
+                        chat_id,
+                        method_name,
+                    )
                     break
                 except Exception:
                     continue
@@ -2046,29 +2263,42 @@ async def leave_voice_chat(chat_id: int) -> None:
                     await asyncio.wait_for(fn(chat_id), timeout=LEAVE_METHOD_TIMEOUT)
                     LOG.info(
                         "leave_voice_chat: %s succeeded for %s (attempt %d)",
-                        method_name, chat_id, attempt + 1,
+                        method_name,
+                        chat_id,
+                        attempt + 1,
                     )
                     left = True
                     break
                 except asyncio.TimeoutError:
                     LOG.warning(
                         "leave_voice_chat: %s TIMED OUT for %s (attempt %d) — moving on",
-                        method_name, chat_id, attempt + 1,
+                        method_name,
+                        chat_id,
+                        attempt + 1,
                     )
                     continue
                 except Exception as e:
                     # "NotInGroupCallError" etc. count as success — we're out.
                     err_name = type(e).__name__.lower()
-                    if "notingroup" in err_name or "notjoined" in err_name or "no active call" in str(e).lower():
+                    if (
+                        "notingroup" in err_name
+                        or "notjoined" in err_name
+                        or "no active call" in str(e).lower()
+                    ):
                         LOG.info(
                             "leave_voice_chat: %s reports %s already not in call for %s",
-                            method_name, chat_id, err_name,
+                            method_name,
+                            chat_id,
+                            err_name,
                         )
                         left = True
                         break
                     LOG.debug(
                         "leave_voice_chat: %s attempt %d failed for %s: %s",
-                        method_name, attempt + 1, chat_id, e,
+                        method_name,
+                        attempt + 1,
+                        chat_id,
+                        e,
                     )
             if left:
                 break
@@ -2109,6 +2339,7 @@ def is_active(chat_id: int) -> bool:
 
 # -- Fresh resolve helper used by skip and auto-next --
 
+
 async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
     """Try ALL platforms CONCURRENTLY for fastest results.
 
@@ -2133,25 +2364,31 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
         try:
             LOG.info(
                 "fresh_resolve FAST PATH for %s: using existing media for '%s'",
-                chat_id, item.title,
+                chat_id,
+                item.title,
             )
             if item.stream_type == "video":
                 await stream_video(
-                    chat_id, item.media_path,
-                    title=item.title, duration=item.duration,
+                    chat_id,
+                    item.media_path,
+                    title=item.title,
+                    duration=item.duration,
                     skip_url_check=True,
                 )
             else:
                 await stream_audio(
-                    chat_id, item.media_path,
-                    title=item.title, duration=item.duration,
+                    chat_id,
+                    item.media_path,
+                    title=item.title,
+                    duration=item.duration,
                     skip_url_check=True,
                 )
             return True
         except Exception as fast_exc:
             LOG.warning(
                 "FAST PATH failed for '%s' (%s) — falling back to full resolve",
-                item.title, fast_exc,
+                item.title,
+                fast_exc,
             )
             # Force re-resolve below
             item.media_path = ""
@@ -2165,8 +2402,10 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
         """Try YouTube: download first (reliable), stream URL as backup."""
         try:
             from MusicLyrics.plugins.play.platforms.youtube import (
-                get_audio_stream_url, get_video_stream_url,
-                is_youtube_url, search_and_download_audio as yt_search_dl,
+                get_audio_stream_url,
+                get_video_stream_url,
+                is_youtube_url,
+                search_and_download_audio as yt_search_dl,
                 search_and_download_video as yt_search_dl_video,
                 search_youtube as _yt_search,
                 download_audio as _yt_dl_audio,
@@ -2206,7 +2445,10 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
     async def _try_jiosaavn():
         """Try JioSaavn: stream URL first, then download."""
         try:
-            from MusicLyrics.plugins.play.platforms.jiosaavn import search_jiosaavn as _js_search
+            from MusicLyrics.plugins.play.platforms.jiosaavn import (
+                search_jiosaavn as _js_search,
+            )
+
             js_result = await _js_search(item.title)
             if js_result and js_result.get("download_url"):
                 return js_result["download_url"], True, "jiosaavn"
@@ -2233,7 +2475,11 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
             pass
         return None, False, ""
 
-    LOG.info("fresh_resolve: trying ALL platforms concurrently for %s: '%s'", chat_id, item.title)
+    LOG.info(
+        "fresh_resolve: trying ALL platforms concurrently for %s: '%s'",
+        chat_id,
+        item.title,
+    )
 
     tasks = {
         asyncio.create_task(_try_youtube()): "youtube",
@@ -2251,7 +2497,9 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
                     fresh_path = result_path
                     fresh_is_stream = result_stream
                     _last_successful_platform[chat_id] = platform
-                    LOG.info("fresh_resolve: %s succeeded for '%s'", platform, item.title)
+                    LOG.info(
+                        "fresh_resolve: %s succeeded for '%s'", platform, item.title
+                    )
                     for p in pending:
                         p.cancel()
                     pending = set()
@@ -2267,9 +2515,21 @@ async def _fresh_resolve_and_play(chat_id: int, item) -> bool:
     item.is_stream_url = fresh_is_stream
 
     if item.stream_type == "video":
-        await stream_video(chat_id, item.media_path, title=item.title, duration=item.duration, skip_url_check=True)
+        await stream_video(
+            chat_id,
+            item.media_path,
+            title=item.title,
+            duration=item.duration,
+            skip_url_check=True,
+        )
     else:
-        await stream_audio(chat_id, item.media_path, title=item.title, duration=item.duration, skip_url_check=True)
+        await stream_audio(
+            chat_id,
+            item.media_path,
+            title=item.title,
+            duration=item.duration,
+            skip_url_check=True,
+        )
 
     return True
 
@@ -2318,8 +2578,9 @@ async def _ensure_assistant_in_vc(chat_id: int) -> None:
             LOG.debug("_ensure_assistant_in_vc: %s ok for %s", method_name, chat_id)
             break
         except Exception as e:
-            LOG.debug("_ensure_assistant_in_vc: %s failed for %s: %s",
-                      method_name, chat_id, e)
+            LOG.debug(
+                "_ensure_assistant_in_vc: %s failed for %s: %s", method_name, chat_id, e
+            )
     # Raw-API leave as belt-and-suspenders — succeeds even if pytgcalls is wedged.
     try:
         await _raw_leave_group_call(chat_id)
@@ -2339,6 +2600,7 @@ async def _ensure_assistant_in_vc(chat_id: int) -> None:
 
 
 # -- Auto-recovering chain player --------------------------------------------
+
 
 async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
     """Try playing queue items one after another until one succeeds.
@@ -2373,7 +2635,9 @@ async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
     function returns ``None`` should the caller leave the VC — and even
     then only because there genuinely are no more songs to try.
     """
-    from MusicLyrics.plugins.play.queue import skip_queue as _sq  # avoid circular import
+    from MusicLyrics.plugins.play.queue import (
+        skip_queue as _sq,
+    )  # avoid circular import
 
     # Per-attempt wall-clock cap.  Lower than before (was 35s) so a single
     # bad track can't hang the skip pipeline; 22s comfortably covers a
@@ -2410,13 +2674,20 @@ async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
         except asyncio.TimeoutError:
             LOG.warning(
                 "_try_play_chain: resolve+play TIMED OUT for '%s' in %s (attempt %d/%d)",
-                title, chat_id, attempt, max_attempts,
+                title,
+                chat_id,
+                attempt,
+                max_attempts,
             )
             success = False
         except Exception as e:
             LOG.warning(
                 "_try_play_chain: resolve+play raised for '%s' in %s (attempt %d/%d): %s",
-                title, chat_id, attempt, max_attempts, e,
+                title,
+                chat_id,
+                attempt,
+                max_attempts,
+                e,
             )
             success = False
 
@@ -2432,7 +2703,10 @@ async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
         LOG.info(
             "_try_play_chain: '%s' failed in %s — popping next item and retrying "
             "(attempt %d/%d, will rejoin VC before next attempt)",
-            title, chat_id, attempt, max_attempts,
+            title,
+            chat_id,
+            attempt,
+            max_attempts,
         )
         # Pop next item from queue and try it
         try:
@@ -2445,6 +2719,7 @@ async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
 
 
 # -- Stream-end callback ---
+
 
 async def _on_stream_end(client, update):
     """When current track ends, play next in queue or leave."""
@@ -2491,7 +2766,11 @@ async def _on_stream_end(client, update):
         return
 
     if chat_id is None:
-        LOG.warning("Stream end event with unknown chat_id: %s (type: %s)", update, type(update).__name__)
+        LOG.warning(
+            "Stream end event with unknown chat_id: %s (type: %s)",
+            update,
+            type(update).__name__,
+        )
         return
 
     LOG.info("Stream end event for chat %s", chat_id)
@@ -2500,7 +2779,9 @@ async def _on_stream_end(client, update):
     # deliver an end-event for the same track in rapid succession.
     # Without this guard the queue advances twice and songs get skipped.
     if _END_HANDLING.get(chat_id):
-        LOG.debug("Stream-end already being handled for %s, ignoring duplicate", chat_id)
+        LOG.debug(
+            "Stream-end already being handled for %s, ignoring duplicate", chat_id
+        )
         return
     _END_HANDLING[chat_id] = True
 
@@ -2517,7 +2798,10 @@ async def _on_stream_end(client, update):
 
         # Prevent double-processing: if auto-next is already running for this chat, skip
         if chat_id in _auto_next_in_progress:
-            LOG.info("Auto-next already in progress for %s — ignoring duplicate stream-end event", chat_id)
+            LOG.info(
+                "Auto-next already in progress for %s — ignoring duplicate stream-end event",
+                chat_id,
+            )
             return
 
         _auto_next_in_progress.add(chat_id)
@@ -2699,7 +2983,7 @@ if pytgcalls is not None:
             LOG.debug("TypeError in stream-end handler (handled): %s", e)
             # Try extracting chat_id directly without async
             try:
-                cid = getattr(update, 'chat_id', None)
+                cid = getattr(update, "chat_id", None)
                 if cid is not None:
                     await _on_stream_end(None, cid)
             except Exception:
@@ -2714,7 +2998,7 @@ if pytgcalls is not None:
         except TypeError as e:
             LOG.debug("TypeError in stream-end handler (handled): %s", e)
             try:
-                cid = getattr(update, 'chat_id', None)
+                cid = getattr(update, "chat_id", None)
                 if cid is not None:
                     await _on_stream_end(client, cid)
             except Exception:
@@ -2726,21 +3010,29 @@ if pytgcalls is not None:
     if not _registered:
         try:
             from pytgcalls import filters as _ptg_filters
+
             if hasattr(_ptg_filters, "stream_end"):
                 # Try 1-arg signature first (newer py-tgcalls)
                 try:
+
                     @pytgcalls.on_update(_ptg_filters.stream_end)
                     async def _stream_end_handler_1(update):
                         await _safe_stream_end_1arg(update)
+
                     _registered = True
-                    LOG.info("Stream-end callback registered via filters.stream_end (1-arg)")
+                    LOG.info(
+                        "Stream-end callback registered via filters.stream_end (1-arg)"
+                    )
                 except TypeError:
                     # Try 2-arg signature
                     @pytgcalls.on_update(_ptg_filters.stream_end)
                     async def _stream_end_handler_2(client, update):
                         await _safe_stream_end_2arg(client, update)
+
                     _registered = True
-                    LOG.info("Stream-end callback registered via filters.stream_end (2-arg)")
+                    LOG.info(
+                        "Stream-end callback registered via filters.stream_end (2-arg)"
+                    )
         except (ImportError, AttributeError, TypeError) as e:
             LOG.debug("Method 1 (filters.stream_end) failed: %s", e)
 
@@ -2749,17 +3041,25 @@ if pytgcalls is not None:
         try:
             if hasattr(pytgcalls, "on_stream_end"):
                 try:
+
                     @pytgcalls.on_stream_end()
                     async def _stream_end_handler3(update):
                         await _safe_stream_end_1arg(update)
+
                     _registered = True
-                    LOG.info("Stream-end callback registered via on_stream_end() (1-arg)")
+                    LOG.info(
+                        "Stream-end callback registered via on_stream_end() (1-arg)"
+                    )
                 except TypeError:
+
                     @pytgcalls.on_stream_end()
                     async def _stream_end_handler4(client, update):
                         await _safe_stream_end_2arg(client, update)
+
                     _registered = True
-                    LOG.info("Stream-end callback registered via on_stream_end() (2-arg)")
+                    LOG.info(
+                        "Stream-end callback registered via on_stream_end() (2-arg)"
+                    )
         except (AttributeError, TypeError) as e:
             LOG.debug("Method 2 (on_stream_end) failed: %s", e)
 
@@ -2768,14 +3068,18 @@ if pytgcalls is not None:
         try:
             if hasattr(pytgcalls, "on_closed_voice_chat"):
                 try:
+
                     @pytgcalls.on_closed_voice_chat()
                     async def _stream_end_handler5(update):
                         await _safe_stream_end_1arg(update)
+
                     _registered = True
                 except TypeError:
+
                     @pytgcalls.on_closed_voice_chat()
                     async def _stream_end_handler6(client, update):
                         await _safe_stream_end_2arg(client, update)
+
                     _registered = True
                 LOG.info("Stream-end callback registered via on_closed_voice_chat()")
         except (AttributeError, TypeError) as e:
@@ -2784,6 +3088,7 @@ if pytgcalls is not None:
     # Method 4: py-tgcalls >= 2.1 raw on_update without filter
     if not _registered:
         try:
+
             @pytgcalls.on_update()
             async def _raw_update_handler(client_or_update, update_or_none=None):
                 # Handle both 1-arg and 2-arg signatures
@@ -2793,19 +3098,29 @@ if pytgcalls is not None:
                     update = client_or_update
                 try:
                     update_type = type(update).__name__.lower()
-                    if update_type in ("streamaudioended", "streamvideoended", "streamended", "stream_end"):
+                    if update_type in (
+                        "streamaudioended",
+                        "streamvideoended",
+                        "streamended",
+                        "stream_end",
+                    ):
                         await _on_stream_end(None, update)
-                    elif "end" in update_type and ("stream" in update_type or "audio" in update_type):
+                    elif "end" in update_type and (
+                        "stream" in update_type or "audio" in update_type
+                    ):
                         await _on_stream_end(None, update)
                 except Exception as e:
                     LOG.exception("Error in raw_update_handler: %s", e)
+
             _registered = True
             LOG.info("Stream-end callback registered via raw pytgcalls.on_update()")
         except (AttributeError, TypeError) as e:
             LOG.debug("Method 4 (raw on_update) failed: %s", e)
 
     if not _registered:
-        LOG.warning("Could not register stream-end callback -- timer fallback will handle it.")
+        LOG.warning(
+            "Could not register stream-end callback -- timer fallback will handle it."
+        )
 
     # ALWAYS enable timer-based stream-end detection as a safety net.
     # Even when the callback IS registered, it may never fire if the
@@ -2827,6 +3142,7 @@ if pytgcalls is not None:
             try:
                 # Import locally to avoid circular import at module load
                 from MusicLyrics.plugins.play.queue import get_chat_queue as _gcq
+
                 for chat_id in list(_active_chats):
                     if chat_id not in _play_start_times:
                         continue
@@ -2835,13 +3151,16 @@ if pytgcalls is not None:
                     if duration > 0 and elapsed > duration + 10:
                         LOG.info(
                             "Fallback timer: end-of-track for %s (elapsed=%.0f, duration=%d)",
-                            chat_id, elapsed, duration,
+                            chat_id,
+                            elapsed,
+                            duration,
                         )
                         await _on_stream_end(None, chat_id)
                     elif duration <= 0 and elapsed > UNKNOWN_DURATION_CAP_SEC:
                         LOG.warning(
                             "Fallback timer: unknown-duration safety cap hit for %s (elapsed=%.0f)",
-                            chat_id, elapsed,
+                            chat_id,
+                            elapsed,
                         )
                         await _on_stream_end(None, chat_id)
             except Exception as e:
@@ -2856,6 +3175,7 @@ if pytgcalls is not None:
     # bookkeeping still get cleaned up.
     async def _vc_orphan_reaper():
         from MusicLyrics.plugins.play.queue import get_chat_queue as _gcq
+
         while True:
             await asyncio.sleep(5)
             try:
@@ -2867,7 +3187,9 @@ if pytgcalls is not None:
                     if asyncio.iscoroutine(calls):
                         calls = await calls
                     if isinstance(calls, (list, set, tuple)):
-                        suspects.update(int(c) for c in calls if isinstance(c, (int, str)))
+                        suspects.update(
+                            int(c) for c in calls if isinstance(c, (int, str))
+                        )
                     elif isinstance(calls, dict):
                         suspects.update(int(c) for c in calls.keys())
                 except Exception:
@@ -2912,7 +3234,8 @@ if pytgcalls is not None:
                     if now - seen_at[cid] > AGE_LIMIT_SEC:
                         LOG.warning(
                             "auto_next watchdog: clearing stuck flag for %s (age=%.0fs)",
-                            cid, now - seen_at[cid],
+                            cid,
+                            now - seen_at[cid],
                         )
                         _auto_next_in_progress.discard(cid)
                         seen_at.pop(cid, None)
@@ -2924,6 +3247,7 @@ if pytgcalls is not None:
     # ── ALSO register on_kicked / on_left to clean up ──
     try:
         if hasattr(pytgcalls, "on_kicked"):
+
             @pytgcalls.on_kicked()
             async def _on_kicked(client, chat_id: int):
                 LOG.info("Userbot kicked from voice chat in %s — cleaning up", chat_id)
@@ -2938,7 +3262,9 @@ if pytgcalls is not None:
     # ── Register on_group_call_left for when the userbot leaves/is removed ──
     try:
         from pytgcalls import filters as _ptg_filters2
+
         if hasattr(_ptg_filters2, "left"):
+
             @pytgcalls.on_update(_ptg_filters2.left)
             async def _on_left_handler(client, update):
                 left_chat = None
@@ -2953,6 +3279,7 @@ if pytgcalls is not None:
                     await _pop_now_playing(left_chat)
                     _auto_next_in_progress.discard(left_chat)
                     await clear_queue(left_chat)
+
             LOG.info("Left voice chat handler registered via pytgcalls.filters.left")
     except (ImportError, AttributeError, TypeError) as e:
         LOG.debug("Left filter registration failed: %s", e)
