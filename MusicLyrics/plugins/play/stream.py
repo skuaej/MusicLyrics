@@ -3148,15 +3148,21 @@ async def _on_stream_end(client, update):
                     except Exception:
                         pass
 
-                # Queue-added ("Queue-তে যোগ হয়েছে") notifications are now
-                # ONLY cleaned up when the queue is fully exhausted — per
-                # user request, we no longer delete one notification per
-                # song end.  This means queue messages persist while songs
-                # are still playing, and are flushed in bulk when the queue
-                # becomes empty.  Thumbnails are NEVER touched here.
-                if next_item is None:
-                    # Queue is exhausted — clean up every remaining queue-added
-                    # notification for this chat.
+                # Queue-added ("Queue-তে যোগ হয়েছে") notification cleanup.
+                # When a track finishes and the queue still has more songs,
+                # delete the OLDEST queue-added notification — that one
+                # corresponds to the song that is about to leave the queue
+                # to start playing right now.  When the queue is fully
+                # exhausted, flush every remaining queue-added notification
+                # as a safety net.  Thumbnails are NEVER touched here.
+                if next_item is not None:
+                    qa_msg = await _pop_oldest_queue_added(chat_id)
+                    if qa_msg is not None:
+                        try:
+                            await qa_msg.delete()
+                        except Exception:
+                            pass
+                else:
                     qa_msgs = await _pop_all_queue_added(chat_id)
                     for qa_msg in qa_msgs:
                         try:
