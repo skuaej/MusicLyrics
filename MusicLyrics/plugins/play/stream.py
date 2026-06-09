@@ -666,6 +666,27 @@ def _get_current_theme() -> dict:
     return _BUTTON_THEMES[_current_theme_index % len(_BUTTON_THEMES)]
 
 
+_OWNER_MENTION_CACHE: Optional[str] = None
+
+
+async def get_owner_mention() -> str:
+    """Fetch and cache the owner's display name for a clean mention."""
+    global _OWNER_MENTION_CACHE
+    if _OWNER_MENTION_CACHE is not None:
+        return _OWNER_MENTION_CACHE
+
+    try:
+        user = await bot.get_users("R4J_81")
+        name = user.first_name
+        if user.last_name:
+            name += f" {user.last_name}"
+        _OWNER_MENTION_CACHE = f"[{name}](https://t.me/R4J_81)"
+    except Exception:
+        _OWNER_MENTION_CACHE = "[R4J_81](https://t.me/R4J_81)"
+
+    return _OWNER_MENTION_CACHE
+
+
 def _control_keyboard(color: str = "") -> InlineKeyboardMarkup:
     """Build stylish premium control keyboard with animated emoji icons.
 
@@ -1450,16 +1471,17 @@ def _format_progress(elapsed: int, total: int) -> str:
     return f"{t['bar_left']}  {elapsed_str}  {bar}  {total_str}"
 
 
-def _build_progress_text(current, elapsed: int, total: int) -> str:
+async def _build_progress_text(current, elapsed: int, total: int) -> str:
     progress_text = _format_progress(elapsed, total)
     dur = format_duration(total)
     t = _get_current_theme()
+    owner_mention = await get_owner_mention()
     return (
         f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
         f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{current.title}]({current.url})\n"
         f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
         f"> 👑  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {current.requester}\n\n"
-        f"{progress_text}\n\n✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
+        f"{progress_text}\n\n✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}"
     )
 
 
@@ -1495,7 +1517,7 @@ async def _central_progress_loop():
                     current = await get_current(chat_id)
                     if not current:
                         continue
-                    text = _build_progress_text(current, elapsed, total)
+                    text = await _build_progress_text(current, elapsed, total)
                     last_msg = msgs[-1]
                     try:
                         if hasattr(last_msg, "photo") and last_msg.photo:
@@ -2897,13 +2919,14 @@ async def _on_stream_end(client, update):
                 # Queue is empty — send "song ended" message with add-to-group button
                 try:
                     t = _get_current_theme()
+                    owner_mention = await get_owner_mention()
                     finish_msg = await bot.send_message(
                         chat_id,
                         f"▸ **ꜱᴏɴɢ ᴇɴᴅᴇᴅ** ✅\n\n"
                         f"{t['title_icon']} **ꜱʜᴇꜱʜ ɢᴀᴀɴ:** {finished_title}\n"
                         f"👤 **ꜱʜᴜɴɪʏᴇᴄʜɪʟᴇɴ:** {finished_requester}\n\n"
                         f"🔄 আবার গান শুনতে `/play` কমান্ড দিন।\n\n"
-                        f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
+                        f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
                         reply_markup=_song_ended_keyboard(),
                     )
                     await _add_reaction(chat_id, finish_msg.id)
@@ -2943,13 +2966,14 @@ async def _on_stream_end(client, update):
                 await _start_progress_timer(chat_id, next_item.duration)
 
                 t = _get_current_theme()
+                owner_mention = await get_owner_mention()
                 np_msg = await bot.send_message(
                     chat_id,
                     f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
                     f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{next_item.title}]({next_item.url})\n"
                     f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
                     f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {next_item.requester}"
-                    f"\n\n🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
+                    f"\n\n✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
                     reply_markup=_control_keyboard(color),
                 )
                 # Add reaction to the now playing message

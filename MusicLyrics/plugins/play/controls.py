@@ -51,6 +51,7 @@ from MusicLyrics.plugins.play.stream import (
     suppress_next_stream_end,
     _fresh_resolve_and_play,
     _try_play_chain,
+    get_owner_mention,
 )
 from MusicLyrics.plugins.play.prefetch import prefetch_next
 from MusicLyrics.utils.autodelete import (
@@ -63,6 +64,7 @@ LOG = logging.getLogger(__name__)
 
 
 # ── Admin check for inline-keyboard callbacks ────────────────────────────────
+
 
 async def _is_admin_callback(client: Client, callback: CallbackQuery) -> bool:
     """Return True if the callback user may use restricted control buttons.
@@ -101,6 +103,7 @@ async def _deny_non_admin(callback: CallbackQuery) -> None:
 
 # ── /pause ───────────────────────────────────────────────────────────────────
 
+
 @bot.on_message(filters.command("pause") & not_edited)
 async def pause_cmd(client: Client, message: Message):
     chat_id = message.chat.id
@@ -117,6 +120,7 @@ async def pause_cmd(client: Client, message: Message):
 
 
 # ── /resume ──────────────────────────────────────────────────────────────────
+
 
 @bot.on_message(filters.command("resume") & not_edited)
 async def resume_cmd(client: Client, message: Message):
@@ -135,6 +139,7 @@ async def resume_cmd(client: Client, message: Message):
 
 # ── /skip | /next ────────────────────────────────────────────────────────────
 
+
 @bot.on_message(filters.command(["skip", "next"]) & not_edited)
 async def skip_cmd(client: Client, message: Message):
     chat_id = message.chat.id
@@ -150,9 +155,7 @@ async def skip_cmd(client: Client, message: Message):
     try:
         lock = await acquire_skip_lock(chat_id, timeout=15.0)
     except RuntimeError:
-        await message.reply_text(
-            "⏳ আগের command এখনো চলছে — একটু পরে আবার চেষ্টা করুন।"
-        )
+        await message.reply_text("⏳ আগের command এখনো চলছে — একটু পরে আবার চেষ্টা করুন।")
         return
     try:
         # Stop progress timer
@@ -170,8 +173,7 @@ async def skip_cmd(client: Client, message: Message):
         if next_item is None:
             await leave_voice_chat(chat_id)
             reply = await message.reply_text(
-                "✅ **Queue শেষ হয়ে গেছে!**\n\n"
-                "Voice chat থেকে বের হচ্ছি।"
+                "✅ **Queue শেষ হয়ে গেছে!**\n\nVoice chat থেকে বের হচ্ছি।"
             )
             await _add_reaction(chat_id, message.id)
             return
@@ -209,12 +211,13 @@ async def skip_cmd(client: Client, message: Message):
             dur = format_duration(next_item.duration)
             color = _get_next_color()
             t = _get_current_theme()
+            owner_mention = await get_owner_mention()
             reply = await message.reply_text(
                 f"⏭ **ꜱᴋɪᴘᴘᴇᴅ!**\n\n"
                 f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{next_item.title}]({next_item.url})\n"
                 f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
                 f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {next_item.requester}\n\n"
-                f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
+                f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
                 reply_markup=_control_keyboard(color),
             )
             await _add_reaction(chat_id, message.id)
@@ -233,6 +236,7 @@ async def skip_cmd(client: Client, message: Message):
 
 # ── /stop | /end ─────────────────────────────────────────────────────────────
 
+
 @bot.on_message(filters.command(["stop", "end"]) & not_edited)
 async def stop_cmd(client: Client, message: Message):
     chat_id = message.chat.id
@@ -247,9 +251,7 @@ async def stop_cmd(client: Client, message: Message):
     try:
         lock = await acquire_skip_lock(chat_id, timeout=15.0)
     except RuntimeError:
-        await message.reply_text(
-            "⏳ আগের command এখনো চলছে — একটু পরে আবার চেষ্টা করুন।"
-        )
+        await message.reply_text("⏳ আগের command এখনো চলছে — একটু পরে আবার চেষ্টা করুন।")
         return
     try:
         # Stop progress timer
@@ -265,8 +267,7 @@ async def stop_cmd(client: Client, message: Message):
 
         await leave_voice_chat(chat_id)
         reply = await message.reply_text(
-            "⏹ **Stopped!**\n\n"
-            "✅ Queue clear করে voice chat থেকে বের হয়ে গেছি।"
+            "⏹ **Stopped!**\n\n✅ Queue clear করে voice chat থেকে বের হয়ে গেছি।"
         )
         await _add_reaction(chat_id, message.id)
     finally:
@@ -277,6 +278,7 @@ async def stop_cmd(client: Client, message: Message):
 
 
 # ── /seek <seconds> ──────────────────────────────────────────────────────────
+
 
 @bot.on_message(filters.command("seek") & not_edited)
 async def seek_cmd(client: Client, message: Message):
@@ -306,6 +308,7 @@ async def seek_cmd(client: Client, message: Message):
 
 
 # ── /volume <1-200> ──────────────────────────────────────────────────────────
+
 
 @bot.on_message(filters.command(["volume", "vol"]) & not_edited)
 async def volume_cmd(client: Client, message: Message):
@@ -338,6 +341,7 @@ async def volume_cmd(client: Client, message: Message):
 
 # ── /queue ───────────────────────────────────────────────────────────────────
 
+
 @bot.on_message(filters.command("queue") & not_edited)
 async def queue_cmd(client: Client, message: Message):
     chat_id = message.chat.id
@@ -364,6 +368,7 @@ async def queue_cmd(client: Client, message: Message):
 
 # ── /nowplaying | /np ────────────────────────────────────────────────────────
 
+
 @bot.on_message(filters.command(["nowplaying", "np"]) & not_edited)
 async def nowplaying_cmd(client: Client, message: Message):
     chat_id = message.chat.id
@@ -375,17 +380,20 @@ async def nowplaying_cmd(client: Client, message: Message):
     dur = format_duration(current.duration)
     color = _get_next_color()
     t = _get_current_theme()
+    owner_mention = await get_owner_mention()
     text = (
         f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
         f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{current.title}]({current.url})\n"
         f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
         f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {current.requester}\n\n"
-        f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
+        f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}"
     )
     if current.thumbnail:
         reply = await bot.send_photo(
-            chat_id, photo=current.thumbnail,
-            caption=text, reply_markup=_control_keyboard(color),
+            chat_id,
+            photo=current.thumbnail,
+            caption=text,
+            reply_markup=_control_keyboard(color),
             has_spoiler=True,
         )
     else:
@@ -394,6 +402,7 @@ async def nowplaying_cmd(client: Client, message: Message):
 
 
 # ── /loop ────────────────────────────────────────────────────────────────────
+
 
 @bot.on_message(filters.command("loop") & not_edited)
 async def loop_cmd(client: Client, message: Message):
@@ -408,12 +417,15 @@ async def loop_cmd(client: Client, message: Message):
 
 # ── /shuffle ─────────────────────────────────────────────────────────────────
 
+
 @bot.on_message(filters.command("shuffle") & not_edited)
 async def shuffle_cmd(client: Client, message: Message):
     chat_id = message.chat.id
     items = await get_queue(chat_id)
     if len(items) < 2:
-        reply = await message.reply_text("❌ Shuffle করার জন্য queue-তে কমপক্ষে ২টা গান থাকা দরকার।")
+        reply = await message.reply_text(
+            "❌ Shuffle করার জন্য queue-তে কমপক্ষে ২টা গান থাকা দরকার।"
+        )
         await _add_reaction(chat_id, message.id)
         return
     await shuffle_queue(chat_id)
@@ -424,6 +436,7 @@ async def shuffle_cmd(client: Client, message: Message):
 # ══════════════════════════════════════════════════════════════════════════════
 # Callback query handlers (inline keyboard buttons)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @bot.on_callback_query(filters.regex(r"^ctl_pause$"))
 async def cb_pause(client: Client, callback: CallbackQuery):
@@ -514,8 +527,7 @@ async def cb_skip(client: Client, callback: CallbackQuery):
         if next_item is None:
             try:
                 reply = await callback.message.reply_text(
-                    "✅ **Queue শেষ হয়ে গেছে!**\n\n"
-                    "Voice chat থেকে বের হচ্ছি।"
+                    "✅ **Queue শেষ হয়ে গেছে!**\n\nVoice chat থেকে বের হচ্ছি।"
                 )
             except Exception:
                 pass
@@ -550,12 +562,13 @@ async def cb_skip(client: Client, callback: CallbackQuery):
             dur = format_duration(next_item.duration)
             color = _get_next_color()
             t = _get_current_theme()
+            owner_mention = await get_owner_mention()
             reply = await callback.message.reply_text(
                 f"⏭ **ꜱᴋɪᴘᴘᴇᴅ!**\n\n"
                 f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{next_item.title}]({next_item.url})\n"
                 f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
                 f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {next_item.requester}\n\n"
-                f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
+                f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
                 reply_markup=_control_keyboard(color),
             )
             # Track this new "Now Playing" message (thread-safe)
@@ -563,7 +576,9 @@ async def cb_skip(client: Client, callback: CallbackQuery):
         except Exception:
             LOG.exception("Skip callback failed in %s", chat_id)
             try:
-                err_reply = await callback.message.reply_text("❌ Skip করা যায়নি। আবার চেষ্টা করুন।")
+                err_reply = await callback.message.reply_text(
+                    "❌ Skip করা যায়নি। আবার চেষ্টা করুন।"
+                )
             except Exception:
                 pass
     finally:

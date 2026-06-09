@@ -47,6 +47,7 @@ from MusicLyrics.plugins.play.stream import (
     leave_voice_chat,
     _get_skip_lock,
     acquire_skip_lock,
+    get_owner_mention,
 )
 from MusicLyrics.plugins.play.prefetch import prefetch_next, mark_resolved
 
@@ -785,12 +786,13 @@ async def play_command(client: Client, message: Message):
             pass
         dur = format_duration(duration)
         color = _get_next_color()
+        owner_mention = await get_owner_mention()
         await status_msg.edit_text(
             f"**📜 Queue-তে যোগ হয়েছে #{position}**\n\n"
             f"> 💿 **Title:** {title}\n"
             f"> ⏳ **Duration:** {dur}\n"
             f"> 👑 **Requested by:** {requester}\n\n"
-            f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
+            f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
             reply_markup=_queue_added_keyboard(color),
         )
         await _add_reaction(chat_id, message.id)
@@ -849,12 +851,13 @@ async def play_command(client: Client, message: Message):
     dur = format_duration(duration)
     color = _get_next_color()
     t = _get_current_theme()
+    owner_mention = await get_owner_mention()
     text = (
         f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
         f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{title}]({url})\n"
         f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
         f"> 👑  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {requester}\n\n"
-        f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
+        f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}"
     )
 
     try:
@@ -1069,12 +1072,13 @@ async def playforce_command(client: Client, message: Message):
     dur = format_duration(duration)
     color = _get_next_color()
     t = _get_current_theme()
+    owner_mention = await get_owner_mention()
     text = (
         f"⚡ **ꜰᴏʀᴄᴇ ᴘʟᴀʏ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
         f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{title}]({url})\n"
         f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
         f"> 👑  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {requester}\n\n"
-        f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
+        f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}"
     )
 
     try:
