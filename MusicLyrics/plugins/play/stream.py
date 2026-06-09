@@ -645,17 +645,24 @@ _BUTTON_THEMES = [
     },
 ]
 _current_theme_index: int = 0
+_last_theme_change: float = time.time()
+_THEME_ROTATION_SEC: int = 30  # Change theme automatically every 30 seconds
 
 
 def _get_next_color() -> str:
     """Advance theme index and return current theme label."""
-    global _current_theme_index
+    global _current_theme_index, _last_theme_change
     _current_theme_index += 1
+    _last_theme_change = time.time()
     return _BUTTON_THEMES[_current_theme_index % len(_BUTTON_THEMES)]["label"]
 
 
 def _get_current_theme() -> dict:
-    """Get the current button theme."""
+    """Get the current button theme, auto-rotating every 30 seconds."""
+    global _current_theme_index, _last_theme_change
+    if time.time() - _last_theme_change >= _THEME_ROTATION_SEC:
+        _current_theme_index += 1
+        _last_theme_change = time.time()
     return _BUTTON_THEMES[_current_theme_index % len(_BUTTON_THEMES)]
 
 
