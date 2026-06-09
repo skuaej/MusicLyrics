@@ -616,43 +616,76 @@ async def _resolve_query(query: str, platform: str, msg: Message):
         return None
 
     LOG.info(
-        "Audio query: Strict priority search (YouTube -> JioSaavn -> SoundCloud) for: %s",
+        "Audio query: YouTube-first concurrent race (yt_url || yt_dl) -> JioSaavn -> SoundCloud for: %s",
         query,
     )
 
-    # 1. Try YouTube URL first (with strict timeout to prevent hanging)
+    # ── PHASE 1: YouTube FIRST — race yt_url and yt_dl concurrently so the
+    # fastest YouTube path wins.  Previously these ran sequentially with very
+    # tight (6s/8s) timeouts which caused YouTube to "time out" before it
+    # even had a chance to complete, letting JioSaavn/SoundCloud win every
+    # time.  Running them in parallel + generous budget makes YouTube win
+    # reliably and fast.
+    YT_TOTAL_BUDGET = 22.0  # Total time YouTube gets before falling back
+    YT_URL_HEADSTART = 0.0  # Both start together
+    yt_url_task = _aio.create_task(_try_youtube_url())
+    yt_dl_task = _aio.create_task(_try_youtube_download())
+    yt_tasks = {yt_url_task: "youtube_url", yt_dl_task: "youtube_dl"}
+    yt_deadline = _aio.get_event_loop().time() + YT_TOTAL_BUDGET
+    yt_winner = None
     try:
-        result = await _aio.wait_for(_try_youtube_url(), timeout=6.0)
-        if result and not (
-            isinstance(result, tuple) and result[0] == "__duration_exceeded__"
-        ):
-            LOG.info("Audio query WON by youtube_url for: %s", query)
-            return result
-        elif result and result[0] == "__duration_exceeded__":
-            duration_exceeded = result[1]
-    except _aio.TimeoutError:
-        LOG.info("youtube_url timed out, falling back for: %s", query)
-    except Exception:
-        pass
+        pending = set(yt_tasks.keys())
+        while pending:
+            remaining = yt_deadline - _aio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            done, pending = await _aio.wait(
+                pending,
+                timeout=remaining,
+                return_when=_aio.FIRST_COMPLETED,
+            )
+            if not done:
+                break  # timeout
+            for t in done:
+                try:
+                    r = t.result()
+                except Exception:
+                    r = None
+                if not r:
+                    continue
+                if isinstance(r, tuple) and r and r[0] == "__duration_exceeded__":
+                    duration_exceeded = r[1]
+                    continue
+                # Winner!
+                yt_winner = (yt_tasks[t], r)
+                break
+            if yt_winner:
+                break
+    finally:
+        # Cancel any still-pending YouTube tasks once we have a winner / time out
+        for t in list(yt_tasks.keys()):
+            if not t.done():
+                t.cancel()
+        # Drain cancellations
+        for t in list(yt_tasks.keys()):
+            try:
+                await t
+            except BaseException:
+                pass
 
-    # 2. Try YouTube Download (with strict timeout)
-    try:
-        result = await _aio.wait_for(_try_youtube_download(), timeout=8.0)
-        if result and not (
-            isinstance(result, tuple) and result[0] == "__duration_exceeded__"
-        ):
-            LOG.info("Audio query WON by youtube_dl for: %s", query)
-            return result
-        elif result and result[0] == "__duration_exceeded__":
-            duration_exceeded = result[1]
-    except _aio.TimeoutError:
-        LOG.info("youtube_dl timed out, falling back for: %s", query)
-    except Exception:
-        pass
+    if yt_winner:
+        LOG.info("Audio query WON by %s for: %s", yt_winner[0], query)
+        return yt_winner[1]
+    else:
+        LOG.info(
+            "YouTube paths exhausted (budget %.1fs) for: %s — falling back",
+            YT_TOTAL_BUDGET,
+            query,
+        )
 
-    # 3. Try JioSaavn (with strict timeout)
+    # ── PHASE 2: JioSaavn fallback (generous timeout) ──
     try:
-        result = await _aio.wait_for(_try_jiosaavn(), timeout=6.0)
+        result = await _aio.wait_for(_try_jiosaavn(), timeout=12.0)
         if result and not (
             isinstance(result, tuple) and result[0] == "__duration_exceeded__"
         ):
@@ -665,9 +698,9 @@ async def _resolve_query(query: str, platform: str, msg: Message):
     except Exception:
         pass
 
-    # 4. Try SoundCloud (last resort, with strict timeout)
+    # ── PHASE 3: SoundCloud last-resort (generous timeout) ──
     try:
-        result = await _aio.wait_for(_try_soundcloud(), timeout=6.0)
+        result = await _aio.wait_for(_try_soundcloud(), timeout=12.0)
         if result and not (
             isinstance(result, tuple) and result[0] == "__duration_exceeded__"
         ):
