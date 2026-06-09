@@ -739,6 +739,24 @@ _current_theme_index: int = 0
 _last_theme_change: float = time.time()
 _THEME_ROTATION_SEC: int = 15  # Change theme randomly every 15 seconds
 
+# Large fallback pool used to guarantee that the 12 emoji slots in a rendered
+# theme are all distinct. Whenever the active theme contains a duplicate emoji
+# value, the duplicate is replaced with an unused emoji drawn from this pool,
+# so a single keyboard render never shows the same emoji twice.
+_FALLBACK_EMOJI_POOL = [
+    "🎵", "🎶", "🎷", "🎺", "🥁", "🎻", "🎸", "🎼", "🎤", "🎧",
+    "🎙️", "💿", "📀", "🪘", "📻", "🎚️", "🎛️", "🪗", "🪕",
+    "🌟", "✨", "💫", "⭐", "🌠", "☄️", "🌙", "🌞", "🪐",
+    "🔥", "💥", "⚡", "🌈", "🌊", "🌸", "🌺", "🌼", "🌻", "🌷",
+    "🦋", "🐬", "🦄", "🐳", "🐠", "🐚", "🪸", "🦩", "🐝", "🦚",
+    "👑", "💎", "💍", "🏆", "🎩", "💰", "💵", "💳", "💸", "👜",
+    "🍹", "🍸", "🥂", "🥥", "🍍", "🍒", "🍇", "🍑",
+    "🌴", "🏝️", "🏖️", "🏰", "🏛️", "🏙️", "🏡", "🏦",
+    "🚀", "🌅", "🌃", "🌆", "🎆", "🎇", "🎠", "🎢", "🪩", "🎁",
+    "🧊", "💠", "🔹", "🔘", "🔵", "💧", "🪷", "🌿", "🍀",
+    "🎀", "🩰", "🪄", "🧚", "📿", "🛡️", "⚔️", "🏹",
+]
+
 
 def _get_next_color() -> str:
     """Pick a random theme and return its label."""
@@ -748,8 +766,59 @@ def _get_next_color() -> str:
     return _BUTTON_THEMES[_current_theme_index]["label"]
 
 
+def _dedupe_theme(theme: dict) -> dict:
+    """Return a copy of ``theme`` with every emoji value made unique.
+
+    The button keyboard renders 12 emoji slots. Some hand-authored themes
+    happen to reuse the same emoji in more than one slot (e.g. the *Ocean*
+    theme uses 🌊 three times). When the keyboard is built, every slot must
+    show a distinct emoji so the user never sees the same icon twice in a
+    single render. Any duplicate is swapped for a fresh emoji drawn from
+    ``_FALLBACK_EMOJI_POOL`` (skipping anything already in use).
+    """
+    # Iterate emoji-bearing fields in a stable order so two consecutive
+    # renders of the same underlying theme stay visually consistent.
+    emoji_keys = [
+        "resume", "mute", "song", "skip", "yorsa", "home", "close",
+        "bar_left", "bar_dot", "header", "title_icon", "dur_icon",
+    ]
+    result = dict(theme)
+    used: set = set()
+    # Pre-collect every emoji the theme already uses so the fallback pool
+    # never re-introduces one of the originals as a "replacement".
+    original_values = {result.get(k) for k in emoji_keys if result.get(k)}
+    # Shuffle the fallback pool so duplicates are replaced with varied
+    # picks across renders rather than always the same alphabetically-first
+    # fallback.
+    pool = [e for e in _FALLBACK_EMOJI_POOL if e not in original_values]
+    random.shuffle(pool)
+    pool_iter = iter(pool)
+    for k in emoji_keys:
+        value = result.get(k)
+        if not value or value in used:
+            # Pick the next unused fallback emoji not already on the keyboard.
+            replacement = None
+            for candidate in pool_iter:
+                if candidate not in used:
+                    replacement = candidate
+                    break
+            if replacement is None:
+                # Extremely unlikely (pool exhausted) — keep the original
+                # rather than crash; visual dedupe is best-effort.
+                replacement = value or ""
+            result[k] = replacement
+            used.add(replacement)
+        else:
+            used.add(value)
+    return result
+
+
 def _get_current_theme() -> dict:
-    """Get current button theme, auto-rotating randomly every 30 seconds."""
+    """Get current button theme, auto-rotating randomly every 30 seconds.
+
+    The returned theme is guaranteed to have a unique emoji in every slot
+    so the rendered keyboard never shows the same emoji twice at once.
+    """
     global _current_theme_index, _last_theme_change
     if time.time() - _last_theme_change >= _THEME_ROTATION_SEC:
         # Pick a random theme different from the current one
@@ -760,7 +829,7 @@ def _get_current_theme() -> dict:
             random.choice(available_indices) if available_indices else 0
         )
         _last_theme_change = time.time()
-    return _BUTTON_THEMES[_current_theme_index]
+    return _dedupe_theme(_BUTTON_THEMES[_current_theme_index])
 
 
 _OWNER_MENTION_CACHE: Optional[str] = None
