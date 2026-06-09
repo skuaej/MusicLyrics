@@ -614,46 +614,70 @@ async def _resolve_query(query: str, platform: str, msg: Message):
             LOG.debug("soundcloud failed: %s", e)
         return None
 
-    LOG.info("Audio query: concurrent search for fastest results: %s", query)
+    LOG.info(
+        "Audio query: Strict priority search (YouTube -> JioSaavn -> SoundCloud) for: %s",
+        query,
+    )
 
-    # Run all platforms concurrently. First successful result wins.
-    tasks = {
-        _aio.create_task(_try_youtube_url()): "youtube_url",
-        _aio.create_task(_try_youtube_download()): "youtube_dl",
-        _aio.create_task(_try_jiosaavn()): "jiosaavn",
-        _aio.create_task(_try_soundcloud()): "soundcloud",
-    }
+    # 1. Try YouTube URL first (with strict timeout to prevent hanging)
+    try:
+        result = await _aio.wait_for(_try_youtube_url(), timeout=6.0)
+        if result and not (
+            isinstance(result, tuple) and result[0] == "__duration_exceeded__"
+        ):
+            LOG.info("Audio query WON by youtube_url for: %s", query)
+            return result
+        elif result and result[0] == "__duration_exceeded__":
+            duration_exceeded = result[1]
+    except _aio.TimeoutError:
+        LOG.info("youtube_url timed out, falling back for: %s", query)
+    except Exception:
+        pass
 
-    pending = set(tasks.keys())
-    winner_result = None
-    winner_tag = None
+    # 2. Try YouTube Download (with strict timeout)
+    try:
+        result = await _aio.wait_for(_try_youtube_download(), timeout=8.0)
+        if result and not (
+            isinstance(result, tuple) and result[0] == "__duration_exceeded__"
+        ):
+            LOG.info("Audio query WON by youtube_dl for: %s", query)
+            return result
+        elif result and result[0] == "__duration_exceeded__":
+            duration_exceeded = result[1]
+    except _aio.TimeoutError:
+        LOG.info("youtube_dl timed out, falling back for: %s", query)
+    except Exception:
+        pass
 
-    while pending:
-        done, pending = await _aio.wait(pending, return_when=_aio.FIRST_COMPLETED)
-        for task in done:
-            try:
-                result = task.result()
-                if result:
-                    if (
-                        isinstance(result, tuple)
-                        and result
-                        and result[0] == "__duration_exceeded__"
-                    ):
-                        duration_exceeded = result[1]
-                        continue
-                    winner_result = result
-                    winner_tag = tasks[task]
-                    # Cancel remaining tasks to save resources
-                    for p in pending:
-                        p.cancel()
-                    pending = set()
-                    break
-            except Exception:
-                pass
+    # 3. Try JioSaavn (with strict timeout)
+    try:
+        result = await _aio.wait_for(_try_jiosaavn(), timeout=6.0)
+        if result and not (
+            isinstance(result, tuple) and result[0] == "__duration_exceeded__"
+        ):
+            LOG.info("Audio query WON by jiosaavn for: %s", query)
+            return result
+        elif result and result[0] == "__duration_exceeded__":
+            duration_exceeded = result[1]
+    except _aio.TimeoutError:
+        LOG.info("jiosaavn timed out, falling back for: %s", query)
+    except Exception:
+        pass
 
-    if winner_result:
-        LOG.info("Audio query WON by %s for: %s", winner_tag, query)
-        return winner_result
+    # 4. Try SoundCloud (last resort, with strict timeout)
+    try:
+        result = await _aio.wait_for(_try_soundcloud(), timeout=6.0)
+        if result and not (
+            isinstance(result, tuple) and result[0] == "__duration_exceeded__"
+        ):
+            LOG.info("Audio query WON by soundcloud for: %s", query)
+            return result
+        elif result and result[0] == "__duration_exceeded__":
+            duration_exceeded = result[1]
+    except _aio.TimeoutError:
+        LOG.info("soundcloud timed out for: %s", query)
+    except Exception:
+        pass
 
     if duration_exceeded:
         raise ValueError(
