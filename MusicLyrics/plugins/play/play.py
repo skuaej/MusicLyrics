@@ -50,6 +50,22 @@ from MusicLyrics.plugins.play.stream import (
     get_owner_mention,
 )
 from MusicLyrics.plugins.play.prefetch import prefetch_next, mark_resolved
+from MusicLyrics.helpers.thumbnails import gen_thumbnail
+
+
+async def _build_thumb(title: str, channel: str, duration: int, thumbnail_url: str, requester: str) -> str | None:
+    """Generate a custom branded thumbnail. Returns local path or None on failure."""
+    try:
+        return await gen_thumbnail(
+            title=title or "Unknown",
+            artist=channel or "Unknown Artist",
+            duration=duration or 0,
+            thumbnail_url=thumbnail_url or "",
+            requester=requester or "Unknown",
+        )
+    except Exception as _e:
+        LOG.debug("gen_thumbnail failed: %s", _e)
+        return None
 
 
 async def _safe_edit(msg, text: str, **kwargs) -> bool:
@@ -894,7 +910,10 @@ async def play_command(client: Client, message: Message):
     )
 
     try:
-        if thumbnail:
+        # Always try to generate a custom branded thumbnail (with spoiler)
+        custom_thumb = await _build_thumb(title, channel, duration, thumbnail, requester)
+        photo_src = custom_thumb or (thumbnail if thumbnail else None)
+        if photo_src:
             try:
                 await status_msg.delete()
             except Exception:
@@ -902,7 +921,7 @@ async def play_command(client: Client, message: Message):
             try:
                 now_playing_msg = await bot.send_photo(
                     chat_id,
-                    photo=thumbnail,
+                    photo=photo_src,
                     caption=text,
                     reply_markup=_control_keyboard(color),
                     has_spoiler=True,
@@ -912,12 +931,30 @@ async def play_command(client: Client, message: Message):
                 # when YouTube hands us a stale thumbnail. Fall back to a
                 # plain message instead of letting the handler die.
                 LOG.debug("play send_photo failed for %s: %s", chat_id, send_exc)
-                now_playing_msg = await bot.send_message(
-                    chat_id,
-                    text,
-                    reply_markup=_control_keyboard(color),
-                    disable_web_page_preview=True,
-                )
+                # Last-ditch: try the raw URL if we were using the custom file
+                if custom_thumb and thumbnail and photo_src != thumbnail:
+                    try:
+                        now_playing_msg = await bot.send_photo(
+                            chat_id,
+                            photo=thumbnail,
+                            caption=text,
+                            reply_markup=_control_keyboard(color),
+                            has_spoiler=True,
+                        )
+                    except Exception:
+                        now_playing_msg = await bot.send_message(
+                            chat_id,
+                            text,
+                            reply_markup=_control_keyboard(color),
+                            disable_web_page_preview=True,
+                        )
+                else:
+                    now_playing_msg = await bot.send_message(
+                        chat_id,
+                        text,
+                        reply_markup=_control_keyboard(color),
+                        disable_web_page_preview=True,
+                    )
             # Track this message so we can delete it when track ends (thread-safe)
             await _add_now_playing(chat_id, now_playing_msg)
             await _add_reaction(chat_id, message.id)
@@ -1115,7 +1152,10 @@ async def playforce_command(client: Client, message: Message):
     )
 
     try:
-        if thumbnail:
+        # Always try to generate a custom branded thumbnail (with spoiler)
+        custom_thumb = await _build_thumb(title, channel, duration, thumbnail, requester)
+        photo_src = custom_thumb or (thumbnail if thumbnail else None)
+        if photo_src:
             try:
                 await status_msg.delete()
             except Exception:
@@ -1123,19 +1163,36 @@ async def playforce_command(client: Client, message: Message):
             try:
                 now_playing_msg = await bot.send_photo(
                     chat_id,
-                    photo=thumbnail,
+                    photo=photo_src,
                     caption=text,
                     reply_markup=_control_keyboard(color),
                     has_spoiler=True,
                 )
             except Exception as send_exc:
                 LOG.debug("playforce send_photo failed for %s: %s", chat_id, send_exc)
-                now_playing_msg = await bot.send_message(
-                    chat_id,
-                    text,
-                    reply_markup=_control_keyboard(color),
-                    disable_web_page_preview=True,
-                )
+                if custom_thumb and thumbnail and photo_src != thumbnail:
+                    try:
+                        now_playing_msg = await bot.send_photo(
+                            chat_id,
+                            photo=thumbnail,
+                            caption=text,
+                            reply_markup=_control_keyboard(color),
+                            has_spoiler=True,
+                        )
+                    except Exception:
+                        now_playing_msg = await bot.send_message(
+                            chat_id,
+                            text,
+                            reply_markup=_control_keyboard(color),
+                            disable_web_page_preview=True,
+                        )
+                else:
+                    now_playing_msg = await bot.send_message(
+                        chat_id,
+                        text,
+                        reply_markup=_control_keyboard(color),
+                        disable_web_page_preview=True,
+                    )
             await _add_now_playing(chat_id, now_playing_msg)
             await _add_reaction(chat_id, message.id)
         else:

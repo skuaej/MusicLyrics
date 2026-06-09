@@ -55,6 +55,22 @@ from MusicLyrics.plugins.play.prefetch import (
     is_prefetched,
     refresh_item_if_stale,
 )
+from MusicLyrics.helpers.thumbnails import gen_thumbnail
+
+
+async def _build_np_thumb(item) -> str | None:
+    """Generate a branded thumbnail for a QueueItem. Returns local path or None."""
+    try:
+        return await gen_thumbnail(
+            title=getattr(item, "title", "") or "Unknown",
+            artist=getattr(item, "channel", "") or getattr(item, "artist", "") or "Unknown Artist",
+            duration=getattr(item, "duration", 0) or 0,
+            thumbnail_url=getattr(item, "thumbnail", "") or "",
+            requester=getattr(item, "requester", "") or "Unknown",
+        )
+    except Exception as _e:
+        LOG.debug("gen_thumbnail failed in stream.py: %s", _e)
+        return None
 
 LOG = logging.getLogger(__name__)
 
@@ -3133,15 +3149,54 @@ async def _on_stream_end(client, update):
 
                 t = _get_current_theme()
                 owner_mention = await get_owner_mention()
-                np_msg = await bot.send_message(
-                    chat_id,
+                caption = (
                     f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
                     f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{next_item.title}]({next_item.url})\n"
                     f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
                     f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {next_item.requester}"
-                    f"\n\n✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
-                    reply_markup=_control_keyboard(color),
+                    f"\n\n✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}"
                 )
+
+                # Generate custom branded thumbnail; fall back to raw URL,
+                # then to plain text — but ALWAYS try a photo first so the
+                # 2nd, 3rd, … songs also get a nice spoiler-covered card.
+                custom_thumb = await _build_np_thumb(next_item)
+                raw_thumb = getattr(next_item, "thumbnail", "") or ""
+                photo_src = custom_thumb or (raw_thumb if raw_thumb else None)
+
+                np_msg = None
+                if photo_src:
+                    try:
+                        np_msg = await bot.send_photo(
+                            chat_id,
+                            photo=photo_src,
+                            caption=caption,
+                            reply_markup=_control_keyboard(color),
+                            has_spoiler=True,
+                        )
+                    except Exception as send_exc:
+                        LOG.debug(
+                            "auto-next send_photo failed for %s: %s",
+                            chat_id,
+                            send_exc,
+                        )
+                        if custom_thumb and raw_thumb and photo_src != raw_thumb:
+                            try:
+                                np_msg = await bot.send_photo(
+                                    chat_id,
+                                    photo=raw_thumb,
+                                    caption=caption,
+                                    reply_markup=_control_keyboard(color),
+                                    has_spoiler=True,
+                                )
+                            except Exception:
+                                np_msg = None
+                if np_msg is None:
+                    np_msg = await bot.send_message(
+                        chat_id,
+                        caption,
+                        reply_markup=_control_keyboard(color),
+                    )
                 # Add reaction to the now playing message
                 await _add_reaction(chat_id, np_msg.id)
                 # Track this message (thread-safe)
