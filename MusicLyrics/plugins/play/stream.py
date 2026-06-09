@@ -995,6 +995,14 @@ async def _do_play_locked(chat_id: int, stream):
             # be swallowed and auto-next won't fire (= "song stuck / queue
             # frozen mid-track" symptom).  Drop the stale bucket here.
             _suppress_stream_end.pop(chat_id, None)
+            # The leave_call we just issued tore down the WebRTC session.
+            # The next play() will trigger a brand-new SDP negotiation, so
+            # the audio track has to be re-bound — i.e. the first-play
+            # warm-up MUST run again on this fresh session. Without this
+            # discard, _warmed_up_chats from the previous (now-destroyed)
+            # session would suppress the warm-up and the first track on
+            # the rejoined call would play silently.
+            _warmed_up_chats.discard(chat_id)
             # Brief pause for Telegram to register the leave before rejoin
             await asyncio.sleep(0.3)
 
@@ -1089,8 +1097,33 @@ async def _do_play_locked(chat_id: int, stream):
     # wait briefly before retrying so we don't race another play() call.
     await _drain_orphan_play_task(chat_id)
 
+    # IMPORTANT: the orphaned play() may have actually SUCCEEDED while we
+    # were waiting (this is the common case on slow / cold-started
+    # deployments where pytgcalls.play() takes longer than the 4 s
+    # PLAY_METHOD_TIMEOUT but still finishes correctly). In that case
+    # _orphan_done already added chat_id to _active_chats and scheduled
+    # warmup. If we now blindly leave_call + rejoin we will TEAR DOWN the
+    # working stream and the brand-new session that replaces it will skip
+    # the warm-up (because _warmed_up_chats already contains chat_id),
+    # producing the classic "first song no sound" symptom.
+    if chat_id in _active_chats:
+        LOG.info(
+            "Orphan play() for %s completed successfully while waiting — "
+            "skipping reset/retry to preserve the working stream",
+            chat_id,
+        )
+        # Force a fresh warm-up on this new session even if the chat was
+        # marked warmed up by a previous (now-discarded) session.
+        _warmed_up_chats.discard(chat_id)
+        await _warmup_first_play_if_needed(chat_id)
+        return
+
     # Second attempt — reset call state first (handles wedged py-tgcalls)
     LOG.info("First play attempt failed for %s — resetting call state and retrying", chat_id)
+    # The previous (failed) attempt may have left chat_id in _warmed_up_chats
+    # via a stale orphan_done callback. Clear it so the retry's warmup
+    # actually runs on the new session.
+    _warmed_up_chats.discard(chat_id)
     if await _try_play(reset_first=True):
         await _warmup_first_play_if_needed(chat_id)
         return
