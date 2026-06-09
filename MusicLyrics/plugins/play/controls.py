@@ -52,6 +52,7 @@ from MusicLyrics.plugins.play.stream import (
     _fresh_resolve_and_play,
     _try_play_chain,
     get_owner_mention,
+    _build_np_thumb,
 )
 from MusicLyrics.plugins.play.prefetch import prefetch_next
 from MusicLyrics.utils.autodelete import (
@@ -212,14 +213,53 @@ async def skip_cmd(client: Client, message: Message):
             color = _get_next_color()
             t = _get_current_theme()
             owner_mention = await get_owner_mention()
-            reply = await message.reply_text(
+            caption = (
                 f"⏭ **ꜱᴋɪᴘᴘᴇᴅ!**\n\n"
                 f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{next_item.title}]({next_item.url})\n"
                 f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
                 f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {next_item.requester}\n\n"
-                f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
-                reply_markup=_control_keyboard(color),
+                f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}"
             )
+
+            # Generate custom branded thumbnail; fall back to raw URL,
+            # then to plain text — always try a photo first so each skip
+            # shows our custom card.
+            custom_thumb = await _build_np_thumb(next_item)
+            raw_thumb = getattr(next_item, "thumbnail", "") or ""
+            photo_src = custom_thumb or (raw_thumb if raw_thumb else None)
+
+            reply = None
+            if photo_src:
+                try:
+                    reply = await bot.send_photo(
+                        chat_id,
+                        photo=photo_src,
+                        caption=caption,
+                        reply_markup=_control_keyboard(color),
+                        has_spoiler=True,
+                    )
+                except Exception as send_exc:
+                    LOG.debug(
+                        "skip_cmd send_photo failed for %s: %s",
+                        chat_id,
+                        send_exc,
+                    )
+                    if custom_thumb and raw_thumb and photo_src != raw_thumb:
+                        try:
+                            reply = await bot.send_photo(
+                                chat_id,
+                                photo=raw_thumb,
+                                caption=caption,
+                                reply_markup=_control_keyboard(color),
+                                has_spoiler=True,
+                            )
+                        except Exception:
+                            reply = None
+            if reply is None:
+                reply = await message.reply_text(
+                    caption,
+                    reply_markup=_control_keyboard(color),
+                )
             await _add_reaction(chat_id, message.id)
             # Track this new "Now Playing" message (thread-safe)
             await _add_now_playing(chat_id, reply)
@@ -563,14 +603,53 @@ async def cb_skip(client: Client, callback: CallbackQuery):
             color = _get_next_color()
             t = _get_current_theme()
             owner_mention = await get_owner_mention()
-            reply = await callback.message.reply_text(
+            caption = (
                 f"⏭ **ꜱᴋɪᴘᴘᴇᴅ!**\n\n"
                 f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{next_item.title}]({next_item.url})\n"
                 f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
                 f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {next_item.requester}\n\n"
-                f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
-                reply_markup=_control_keyboard(color),
+                f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}"
             )
+
+            # Generate custom branded thumbnail; fall back to raw URL,
+            # then to plain text — always try a photo first so each skip
+            # shows our custom card.
+            custom_thumb = await _build_np_thumb(next_item)
+            raw_thumb = getattr(next_item, "thumbnail", "") or ""
+            photo_src = custom_thumb or (raw_thumb if raw_thumb else None)
+
+            reply = None
+            if photo_src:
+                try:
+                    reply = await bot.send_photo(
+                        chat_id,
+                        photo=photo_src,
+                        caption=caption,
+                        reply_markup=_control_keyboard(color),
+                        has_spoiler=True,
+                    )
+                except Exception as send_exc:
+                    LOG.debug(
+                        "cb_skip send_photo failed for %s: %s",
+                        chat_id,
+                        send_exc,
+                    )
+                    if custom_thumb and raw_thumb and photo_src != raw_thumb:
+                        try:
+                            reply = await bot.send_photo(
+                                chat_id,
+                                photo=raw_thumb,
+                                caption=caption,
+                                reply_markup=_control_keyboard(color),
+                                has_spoiler=True,
+                            )
+                        except Exception:
+                            reply = None
+            if reply is None:
+                reply = await callback.message.reply_text(
+                    caption,
+                    reply_markup=_control_keyboard(color),
+                )
             # Track this new "Now Playing" message (thread-safe)
             await _add_now_playing(chat_id, reply)
         except Exception:
