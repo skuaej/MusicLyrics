@@ -85,6 +85,10 @@ _STATE_LOCK = asyncio.Lock()
 # Track "Now Playing" messages for each chat so we can delete them when track ends
 _now_playing_messages: dict[int, list] = {}
 
+# Track "Queue-তে যোগ হয়েছে" notification messages per chat.
+# When a song finishes we delete these so old queue notifications do not pile up.
+_queue_added_messages: dict[int, list] = {}
+
 # Track playback start times for progress display
 _play_start_times: dict[int, float] = {}
 
@@ -187,6 +191,32 @@ async def _remove_now_playing(chat_id: int, msg_id: int) -> None:
             ]
             if not _now_playing_messages[chat_id]:
                 _now_playing_messages.pop(chat_id, None)
+
+
+async def _add_queue_added(chat_id: int, msg) -> None:
+    """Track a 'Queue-তে যোগ হয়েছে' notification message for later deletion."""
+    if msg is None:
+        return
+    async with _NPM_LOCK:
+        _queue_added_messages.setdefault(chat_id, []).append(msg)
+
+
+async def _pop_oldest_queue_added(chat_id: int):
+    """Pop the oldest queue-added notification for chat (or None)."""
+    async with _NPM_LOCK:
+        lst = _queue_added_messages.get(chat_id)
+        if not lst:
+            return None
+        msg = lst.pop(0)
+        if not lst:
+            _queue_added_messages.pop(chat_id, None)
+        return msg
+
+
+async def _pop_all_queue_added(chat_id: int) -> list:
+    """Pop and return every tracked queue-added notification for chat."""
+    async with _NPM_LOCK:
+        return _queue_added_messages.pop(chat_id, [])
 
 
 # Per-chat flag so _on_stream_end cannot double-fire for the same chat.
@@ -932,6 +962,30 @@ def _queue_added_keyboard(color: str = "") -> InlineKeyboardMarkup:
 
 def _song_ended_keyboard() -> InlineKeyboardMarkup:
     """Build the 'song ended' keyboard with Add to Group button."""
+    bot_username = bot.me.username if bot.me else "MusicLyrics"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "➕ ᴀᴅᴅ ᴛᴏ ɢʀᴏᴜᴘ",
+                    url=f"https://t.me/{bot_username}?startgroup=true",
+                ),
+                InlineKeyboardButton(
+                    "💬 ꜱᴜᴘᴘᴏʀᴛ",
+                    url=Config.SUPPORT_GROUP,
+                ),
+            ],
+        ]
+    )
+
+
+def _ended_thumbnail_keyboard() -> InlineKeyboardMarkup:
+    """Minimal 2-button keyboard left under a thumbnail after its song ended.
+
+    Only the two essentials — Add to Group + Support. Playback controls are
+    dropped because the song already finished, so pause/resume/skip would be
+    misleading.
+    """
     bot_username = bot.me.username if bot.me else "MusicLyrics"
     return InlineKeyboardMarkup(
         [
@@ -3074,23 +3128,44 @@ async def _on_stream_end(client, update):
                 ):
                     cleanup(finished.media_path)
 
-                # Only delete the previous "Now Playing" / thumbnail when we
-                # actually have a next track queued.  If the queue is exhausted
-                # we KEEP the last thumbnail in chat and just append a fresh
-                # "song ended" message below — the user explicitly asked for
-                # the last card to stay visible.
+                # Keep the previous "Now Playing" / thumbnail visible after the
+                # song ends — the user explicitly wants thumbnails to STAY.
+                # Instead of deleting, shrink the keyboard under the old card
+                # down to the two essential buttons.  We also delete the
+                # corresponding "Queue-তে যোগ হয়েছে" notification so old queue
+                # messages do not pile up in chat.
+                old_msgs = await _pop_now_playing(chat_id)
+                for old_msg in old_msgs:
+                    try:
+                        await old_msg.edit_reply_markup(
+                            reply_markup=_ended_thumbnail_keyboard()
+                        )
+                        LOG.debug(
+                            "Shrunk previous Now Playing keyboard in %s",
+                            chat_id,
+                        )
+                    except Exception:
+                        pass
+
                 if next_item is not None:
-                    old_msgs = await _pop_now_playing(chat_id)
-                    for old_msg in old_msgs:
+                    # Advancing to next track — drop the oldest queue-added
+                    # notification (it corresponds to the song just finished /
+                    # the one about to play).
+                    qa_msg = await _pop_oldest_queue_added(chat_id)
+                    if qa_msg is not None:
                         try:
-                            await old_msg.delete()
-                            LOG.debug("Deleted previous Now Playing message in %s", chat_id)
+                            await qa_msg.delete()
                         except Exception:
                             pass
                 else:
-                    # Clear the tracking list without deleting the messages so
-                    # the last card remains pinned to the user's view.
-                    await _pop_now_playing(chat_id)
+                    # Queue is exhausted — clean up every remaining queue-added
+                    # notification for this chat.
+                    qa_msgs = await _pop_all_queue_added(chat_id)
+                    for qa_msg in qa_msgs:
+                        try:
+                            await qa_msg.delete()
+                        except Exception:
+                            pass
 
                 if next_item is None:
                     queue_was_empty_before = True

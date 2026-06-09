@@ -37,6 +37,7 @@ from MusicLyrics.plugins.play.stream import (
     _now_playing_messages,
     _add_now_playing,
     _pop_now_playing,
+    _add_queue_added,
     _control_keyboard,
     _queue_added_keyboard,
     _get_next_color,
@@ -844,6 +845,9 @@ async def play_command(client: Client, message: Message):
             f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── {owner_mention}",
             reply_markup=_queue_added_keyboard(color),
         )
+        # Track this queue-added notification so it gets cleaned up when the
+        # corresponding song ends.
+        await _add_queue_added(chat_id, status_msg)
         await _add_reaction(chat_id, message.id)
         return
 
