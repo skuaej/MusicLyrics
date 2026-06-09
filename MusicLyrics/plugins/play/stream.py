@@ -87,7 +87,7 @@ _central_progress_task: Optional[asyncio.Task] = None
 # (re)bind the audio stream, making the first track audible.
 _warmed_up_chats: set[int] = set()
 
-PROGRESS_INTERVAL_SEC = 5  # Update the "now playing" progress every 5 seconds.
+PROGRESS_INTERVAL_SEC = 15  # Update the "now playing" progress every 15 seconds.
 PROGRESS_PER_TICK_CAP = 30  # Max edits per tick to avoid burst FLOOD (was 50).
 
 # Track which platform last succeeded for each chat — prioritize it next time
@@ -551,38 +551,38 @@ async def _add_reaction(chat_id: int, message_id: int) -> None:
 
 
 # ── Premium animated button themes that rotate randomly ──────────────────────
-# Clean aesthetic emoji icons — no colored squares/hearts for better readability.
-# Themes rotate randomly every 30 seconds for a dynamic visual effect.
+# Aesthetic emoji icons — no colored squares/hearts for better readability.
+# Themes rotate randomly every 15 seconds for a dynamic visual effect.
 _BUTTON_THEMES = [
     {
         "resume": "▶️",
         "mute": "⏸️",
         "song": "📜",
         "skip": "⏭️",
-        "yorsa": "➕",
+        "yorsa": "✨",
         "home": "💬",
         "close": "✖️",
         "bar_left": "🎧",
         "bar_dot": "💠",
-        "header": "✨",
+        "header": "🎵",
         "title_icon": "💿",
         "dur_icon": "⏳",
-        "label": "Theme 1",
+        "label": "Classic",
     },
     {
-        "resume": "⏯️",
+        "resume": "🎵",
         "mute": "🔇",
-        "song": "🎶",
+        "song": "🎼",
         "skip": "⏩",
         "yorsa": "🎁",
         "home": "🏠",
         "close": "🛑",
-        "bar_left": "🎵",
+        "bar_left": "🎶",
         "bar_dot": "🔘",
-        "header": "🎵",
+        "header": "🎶",
         "title_icon": "🎼",
         "dur_icon": "⏱️",
-        "label": "Theme 2",
+        "label": "Music",
     },
     {
         "resume": "💎",
@@ -592,49 +592,49 @@ _BUTTON_THEMES = [
         "yorsa": "🌟",
         "home": "💌",
         "close": "❌",
-        "bar_left": "✨",
+        "bar_left": "💠",
         "bar_dot": "🔹",
         "header": "💫",
         "title_icon": "🎙️",
         "dur_icon": "⌛",
-        "label": "Theme 3",
+        "label": "Diamond",
     },
     {
         "resume": "🌊",
         "mute": "🔈",
-        "song": "🎵",
-        "skip": "⏭️",
-        "yorsa": "🌊",
+        "song": "🐬",
+        "skip": "🌅",
+        "yorsa": "🏖️",
         "home": "🌍",
         "close": "🚫",
-        "bar_left": "🐬",
+        "bar_left": "🌊",
         "bar_dot": "💧",
         "header": "🌊",
-        "title_icon": "🎶",
+        "title_icon": "🐚",
         "dur_icon": "⏳",
-        "label": "Theme 4",
+        "label": "Ocean",
     },
     {
         "resume": "🌸",
         "mute": "🤫",
         "song": "🌺",
         "skip": "🦋",
-        "yorsa": "🌸",
+        "yorsa": "🌷",
         "home": "🏡",
         "close": "🥀",
         "bar_left": "🌿",
-        "bar_dot": "🌷",
+        "bar_dot": "🌼",
         "header": "🌸",
         "title_icon": "🌻",
         "dur_icon": "🕰️",
-        "label": "Theme 5",
+        "label": "Flower",
     },
     {
         "resume": "🔥",
         "mute": "🧊",
         "song": "🎸",
         "skip": "⚡",
-        "yorsa": "🔥",
+        "yorsa": "💥",
         "home": "🌍",
         "close": "💥",
         "bar_left": "🎸",
@@ -642,12 +642,102 @@ _BUTTON_THEMES = [
         "header": "🔥",
         "title_icon": "🎤",
         "dur_icon": "⏱️",
-        "label": "Theme 6",
+        "label": "Fire",
+    },
+    {
+        "resume": "🌌",
+        "mute": "🌑",
+        "song": "🪐",
+        "skip": "🚀",
+        "yorsa": "⭐",
+        "home": "🌍",
+        "close": "💫",
+        "bar_left": "🌠",
+        "bar_dot": "✨",
+        "header": "🌌",
+        "title_icon": "🌙",
+        "dur_icon": "🌟",
+        "label": "Galaxy",
+    },
+    {
+        "resume": "👑",
+        "mute": "🤴",
+        "song": "💍",
+        "skip": "🏰",
+        "yorsa": "🦁",
+        "home": "🏛️",
+        "close": "⚔️",
+        "bar_left": "👑",
+        "bar_dot": "💎",
+        "header": "👑",
+        "title_icon": "🏆",
+        "dur_icon": "💰",
+        "label": "Royal",
+    },
+    {
+        "resume": "🎆",
+        "mute": "🌃",
+        "song": "🎇",
+        "skip": "✨",
+        "yorsa": "🌟",
+        "home": "🏙️",
+        "close": "💥",
+        "bar_left": "🎆",
+        "bar_dot": "💫",
+        "header": "🎆",
+        "title_icon": "🌃",
+        "dur_icon": "✨",
+        "label": "Neon",
+    },
+    {
+        "resume": "🌈",
+        "mute": "☁️",
+        "song": "🦄",
+        "skip": "🎠",
+        "yorsa": "🌙",
+        "home": "🏰",
+        "close": "💨",
+        "bar_left": "🌈",
+        "bar_dot": "☁️",
+        "header": "🌈",
+        "title_icon": "🦄",
+        "dur_icon": "🌙",
+        "label": "Dreamy",
+    },
+    {
+        "resume": "💰",
+        "mute": "💳",
+        "song": "💎",
+        "skip": "🥂",
+        "yorsa": "🎩",
+        "home": "🏦",
+        "close": "💸",
+        "bar_left": "💰",
+        "bar_dot": "💎",
+        "header": "💎",
+        "title_icon": "🏆",
+        "dur_icon": "💵",
+        "label": "Luxury",
+    },
+    {
+        "resume": "🏝️",
+        "mute": "🌴",
+        "song": "🍹",
+        "skip": "🐚",
+        "yorsa": "🌺",
+        "home": "🏖️",
+        "close": "🌊",
+        "bar_left": "🏝️",
+        "bar_dot": "🌴",
+        "header": "🏝️",
+        "title_icon": "🍹",
+        "dur_icon": "🐚",
+        "label": "Tropical",
     },
 ]
 _current_theme_index: int = 0
 _last_theme_change: float = time.time()
-_THEME_ROTATION_SEC: int = 30  # Change theme randomly every 30 seconds
+_THEME_ROTATION_SEC: int = 15  # Change theme randomly every 15 seconds
 
 
 def _get_next_color() -> str:
@@ -1518,7 +1608,7 @@ async def _central_progress_loop():
                     msgs = _now_playing_messages.get(chat_id) or []
                     if not msgs:
                         continue
-                    if time.time() - state.get("last_update", 0) < 4:
+                    if time.time() - state.get("last_update", 0) < 14:
                         continue
                     state["last_update"] = time.time()
                     current = await get_current(chat_id)
