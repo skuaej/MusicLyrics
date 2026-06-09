@@ -3129,11 +3129,12 @@ async def _on_stream_end(client, update):
                     cleanup(finished.media_path)
 
                 # Keep the previous "Now Playing" / thumbnail visible after the
-                # song ends — the user explicitly wants thumbnails to STAY.
-                # Instead of deleting, shrink the keyboard under the old card
-                # down to the two essential buttons.  We also delete the
-                # corresponding "Queue-তে যোগ হয়েছে" notification so old queue
-                # messages do not pile up in chat.
+                # song ends — the user explicitly wants thumbnails to STAY
+                # forever, NEVER deleted.  Instead of deleting, shrink the
+                # keyboard under the old card down to the two essential
+                # buttons (the playback controls would be misleading once the
+                # song has finished).  The photo / thumbnail itself is left
+                # untouched in chat.
                 old_msgs = await _pop_now_playing(chat_id)
                 for old_msg in old_msgs:
                     try:
@@ -3147,17 +3148,13 @@ async def _on_stream_end(client, update):
                     except Exception:
                         pass
 
-                if next_item is not None:
-                    # Advancing to next track — drop the oldest queue-added
-                    # notification (it corresponds to the song just finished /
-                    # the one about to play).
-                    qa_msg = await _pop_oldest_queue_added(chat_id)
-                    if qa_msg is not None:
-                        try:
-                            await qa_msg.delete()
-                        except Exception:
-                            pass
-                else:
+                # Queue-added ("Queue-তে যোগ হয়েছে") notifications are now
+                # ONLY cleaned up when the queue is fully exhausted — per
+                # user request, we no longer delete one notification per
+                # song end.  This means queue messages persist while songs
+                # are still playing, and are flushed in bulk when the queue
+                # becomes empty.  Thumbnails are NEVER touched here.
+                if next_item is None:
                     # Queue is exhausted — clean up every remaining queue-added
                     # notification for this chat.
                     qa_msgs = await _pop_all_queue_added(chat_id)
