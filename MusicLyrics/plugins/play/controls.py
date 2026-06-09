@@ -13,6 +13,13 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
 )
 from pyrogram.enums import ChatType, ChatMemberStatus
+from pyrogram.errors import (
+    MessageIdInvalid,
+    MessageNotModified,
+    MessageDeleteForbidden,
+    MessageEditMediaInvalid,
+    WebpageMediaEmpty,
+)
 
 from MusicLyrics.bot import bot
 from MusicLyrics.helpers.filters import not_edited
@@ -60,6 +67,33 @@ from MusicLyrics.utils.autodelete import (
 )
 
 LOG = logging.getLogger(__name__)
+
+
+# ── Safety wrapper for inline-callback edit / delete operations ──────────────
+#
+# Inline button handlers (skip / pause / stop etc.) frequently try to edit
+# or delete a "Now Playing" message that another path has already removed
+# (e.g. _pop_now_playing in skip / stop, or auto-next cleanup).  Pyrogram
+# raises MessageIdInvalid / MessageDeleteForbidden / MessageNotModified —
+# none of which are caught by pyrogram's dispatcher, so they propagate
+# up and crash the worker (= Railway "Deployment crashed" mail).
+#
+# Wrap every edit / delete call from a callback handler with _safe_call.
+async def _safe_call(coro):
+    """Await a pyrogram coroutine while swallowing benign edit/delete errors."""
+    try:
+        return await coro
+    except (
+        MessageIdInvalid,
+        MessageNotModified,
+        MessageDeleteForbidden,
+        MessageEditMediaInvalid,
+        WebpageMediaEmpty,
+    ):
+        return None
+    except Exception as e:
+        LOG.warning("callback edit/delete ignored: %s", e)
+        return None
 
 
 # ── Admin check for inline-keyboard callbacks ────────────────────────────────
