@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import time
 from typing import Optional
 
@@ -549,9 +550,9 @@ async def _add_reaction(chat_id: int, message_id: int) -> None:
             continue  # Try next method
 
 
-# ── Premium animated button themes that rotate ──────────────────────────────
-# Each theme defines aesthetic emoji icons for buttons — emojis cycle through themes
-# every 30 seconds creating a "moving" animation effect.
+# ── Premium animated button themes that rotate randomly ──────────────────────
+# Clean aesthetic emoji icons — no colored squares/hearts for better readability.
+# Themes rotate randomly every 30 seconds for a dynamic visual effect.
 _BUTTON_THEMES = [
     {
         "resume": "▶️",
@@ -566,7 +567,7 @@ _BUTTON_THEMES = [
         "header": "✨",
         "title_icon": "💿",
         "dur_icon": "⏳",
-        "label": "Premium 1",
+        "label": "Theme 1",
     },
     {
         "resume": "⏯️",
@@ -581,7 +582,7 @@ _BUTTON_THEMES = [
         "header": "🎵",
         "title_icon": "🎼",
         "dur_icon": "⏱️",
-        "label": "Premium 2",
+        "label": "Theme 2",
     },
     {
         "resume": "💎",
@@ -596,7 +597,7 @@ _BUTTON_THEMES = [
         "header": "💫",
         "title_icon": "🎙️",
         "dur_icon": "⌛",
-        "label": "Premium 3",
+        "label": "Theme 3",
     },
     {
         "resume": "🌊",
@@ -611,7 +612,7 @@ _BUTTON_THEMES = [
         "header": "🌊",
         "title_icon": "🎶",
         "dur_icon": "⏳",
-        "label": "Premium 4",
+        "label": "Theme 4",
     },
     {
         "resume": "🌸",
@@ -626,7 +627,7 @@ _BUTTON_THEMES = [
         "header": "🌸",
         "title_icon": "🌻",
         "dur_icon": "🕰️",
-        "label": "Premium 5",
+        "label": "Theme 5",
     },
     {
         "resume": "🔥",
@@ -641,29 +642,35 @@ _BUTTON_THEMES = [
         "header": "🔥",
         "title_icon": "🎤",
         "dur_icon": "⏱️",
-        "label": "Premium 6",
+        "label": "Theme 6",
     },
 ]
 _current_theme_index: int = 0
 _last_theme_change: float = time.time()
-_THEME_ROTATION_SEC: int = 30  # Change theme automatically every 30 seconds
+_THEME_ROTATION_SEC: int = 30  # Change theme randomly every 30 seconds
 
 
 def _get_next_color() -> str:
-    """Advance theme index and return current theme label."""
+    """Pick a random theme and return its label."""
     global _current_theme_index, _last_theme_change
-    _current_theme_index += 1
+    _current_theme_index = random.randint(0, len(_BUTTON_THEMES) - 1)
     _last_theme_change = time.time()
-    return _BUTTON_THEMES[_current_theme_index % len(_BUTTON_THEMES)]["label"]
+    return _BUTTON_THEMES[_current_theme_index]["label"]
 
 
 def _get_current_theme() -> dict:
-    """Get the current button theme, auto-rotating every 30 seconds."""
+    """Get current button theme, auto-rotating randomly every 30 seconds."""
     global _current_theme_index, _last_theme_change
     if time.time() - _last_theme_change >= _THEME_ROTATION_SEC:
-        _current_theme_index += 1
+        # Pick a random theme different from the current one
+        available_indices = [
+            i for i in range(len(_BUTTON_THEMES)) if i != _current_theme_index
+        ]
+        _current_theme_index = (
+            random.choice(available_indices) if available_indices else 0
+        )
         _last_theme_change = time.time()
-    return _BUTTON_THEMES[_current_theme_index % len(_BUTTON_THEMES)]
+    return _BUTTON_THEMES[_current_theme_index]
 
 
 _OWNER_MENTION_CACHE: Optional[str] = None
