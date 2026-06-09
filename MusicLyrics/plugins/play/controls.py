@@ -162,15 +162,23 @@ async def skip_cmd(client: Client, message: Message):
         # Stop progress timer
         _stop_progress_timer(chat_id)
 
-        # Delete previous "Now Playing" messages (thread-safe)
-        old_msgs = await _pop_now_playing(chat_id)
-        for old_msg in old_msgs:
-            try:
-                await old_msg.delete()
-            except Exception:
-                pass
-
         next_item = await skip_queue(chat_id, force=True)
+
+        # Only remove the previous "Now Playing" / thumbnail when a queued
+        # track is actually about to play.  If the queue just ran out, keep
+        # the last thumbnail visible — the user asked for it to stay.
+        if next_item is not None:
+            old_msgs = await _pop_now_playing(chat_id)
+            for old_msg in old_msgs:
+                try:
+                    await old_msg.delete()
+                except Exception:
+                    pass
+        else:
+            # Drop the tracking list (messages have served their purpose) but
+            # do NOT delete them from chat.
+            await _pop_now_playing(chat_id)
+
         if next_item is None:
             await leave_voice_chat(chat_id)
             reply = await message.reply_text(
@@ -555,15 +563,23 @@ async def cb_skip(client: Client, callback: CallbackQuery):
         # Stop progress timer
         _stop_progress_timer(chat_id)
 
-        # Delete previous "Now Playing" messages (thread-safe)
-        old_msgs = await _pop_now_playing(chat_id)
-        for old_msg in old_msgs:
-            try:
-                await old_msg.delete()
-            except Exception:
-                pass
-
         next_item = await skip_queue(chat_id, force=True)
+
+        # Only remove the previous "Now Playing" / thumbnail when a queued
+        # track is actually about to play.  If the queue just ran out, keep
+        # the last thumbnail visible — the user asked for it to stay.
+        if next_item is not None:
+            old_msgs = await _pop_now_playing(chat_id)
+            for old_msg in old_msgs:
+                try:
+                    await old_msg.delete()
+                except Exception:
+                    pass
+        else:
+            # Drop the tracking list (messages have served their purpose) but
+            # do NOT delete them from chat.
+            await _pop_now_playing(chat_id)
+
         if next_item is None:
             try:
                 reply = await callback.message.reply_text(

@@ -3074,14 +3074,23 @@ async def _on_stream_end(client, update):
                 ):
                     cleanup(finished.media_path)
 
-                # Delete previous "Now Playing" / thumbnail messages (thread-safe)
-                old_msgs = await _pop_now_playing(chat_id)
-                for old_msg in old_msgs:
-                    try:
-                        await old_msg.delete()
-                        LOG.debug("Deleted previous Now Playing message in %s", chat_id)
-                    except Exception:
-                        pass
+                # Only delete the previous "Now Playing" / thumbnail when we
+                # actually have a next track queued.  If the queue is exhausted
+                # we KEEP the last thumbnail in chat and just append a fresh
+                # "song ended" message below — the user explicitly asked for
+                # the last card to stay visible.
+                if next_item is not None:
+                    old_msgs = await _pop_now_playing(chat_id)
+                    for old_msg in old_msgs:
+                        try:
+                            await old_msg.delete()
+                            LOG.debug("Deleted previous Now Playing message in %s", chat_id)
+                        except Exception:
+                            pass
+                else:
+                    # Clear the tracking list without deleting the messages so
+                    # the last card remains pinned to the user's view.
+                    await _pop_now_playing(chat_id)
 
                 if next_item is None:
                     queue_was_empty_before = True
