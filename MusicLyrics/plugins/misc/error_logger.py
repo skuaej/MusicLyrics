@@ -16,44 +16,6 @@ LOG = logging.getLogger(__name__)
 _BOT_START_TIME = time.time()
 
 
-# ── Dispatcher-level safety net ──────────────────────────────────────────────
-#
-# Pyrogram's dispatcher logs handler exceptions but in some failure modes
-# (notably MessageIdInvalid raised inside a callback after the message
-# was already deleted) the traceback escapes the worker and Railway logs
-# "Deployment crashed".  Wrap dispatcher._execute_handler once at import
-# time so ANY uncaught handler exception is logged and swallowed instead
-# of escaping the event loop.
-def _install_dispatcher_safety_net() -> None:
-    try:
-        dispatcher = bot.dispatcher
-    except Exception:
-        return
-    if getattr(dispatcher, "_safety_net_installed", False):
-        return
-    orig = getattr(dispatcher, "handler_worker", None)
-    if orig is None:
-        return
-
-    async def _safe_handler_worker(lock):
-        while True:
-            try:
-                await orig(lock)
-                return
-            except Exception as e:
-                # We log and continue — never let the worker die.
-                LOG.warning("dispatcher worker swallowed exception: %s", e)
-
-    try:
-        dispatcher.handler_worker = _safe_handler_worker
-        dispatcher._safety_net_installed = True
-    except Exception:
-        pass
-
-
-_install_dispatcher_safety_net()
-
-
 async def notify_owner(text: str):
     """Send a notification to the bot owner and/or LOG_GROUP_ID."""
     # Send to LOG_GROUP_ID

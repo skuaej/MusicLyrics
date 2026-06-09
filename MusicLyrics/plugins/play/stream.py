@@ -107,29 +107,6 @@ _orphan_play_tasks: dict[int, asyncio.Task] = {}
 # leak unbounded native-state references into Python and OOM Railway.
 _ORPHAN_TASKS_HARD_CAP = 2000
 
-# Global concurrency cap across ALL chats so we never fire more than N
-# native pytgcalls.play() invocations at once.  The C extension (NTgCalls)
-# is stressed when many chats start a play simultaneously and can segfault
-# the worker — bounding parallelism here prevents the "deployment crashed"
-# storm when several groups /play at the same time.
-_GLOBAL_PLAY_SEM = asyncio.Semaphore(8)
-
-
-def _safe_bg(coro, label: str = "bg") -> asyncio.Task:
-    """Schedule a background coroutine while swallowing all exceptions.
-
-    Plain ``asyncio.create_task`` lets unhandled exceptions surface as
-    ``"Task exception was never retrieved"`` warnings — and in some
-    pyrogram dispatcher paths they take down the worker.  This wrapper
-    guarantees no background task can ever crash the process.
-    """
-    async def _run():
-        try:
-            await coro
-        except Exception as e:
-            LOG.warning("%s failed: %s", label, e)
-    return asyncio.create_task(_run())
-
 
 def _reap_orphan_tasks() -> None:
     """Drop completed entries from _orphan_play_tasks; FIFO-evict if oversized."""
@@ -865,7 +842,7 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
         # no-op and the first track still plays silent. We do two attempts
         # with progressively longer pre-sleeps so warmup wins even on slow
         # negotiations.
-        for pre_sleep in (2.5, 3.5, 5.0):
+        for pre_sleep in (1.2, 2.0):
             await asyncio.sleep(pre_sleep)
 
             for pause_name, resume_name in (
@@ -876,31 +853,22 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
                 resume_fn = getattr(ptc, resume_name, None)
                 if pause_fn is None or resume_fn is None:
                     continue
-                # Run the pause/resume cycle TWICE.  On cold dynos the
-                # first cycle sometimes lands while WebRTC is still
-                # finalising its track binding; a second cycle a moment
-                # later is usually decisive.
-                succeeded = False
-                for _attempt in (1, 2):
-                    try:
-                        await asyncio.wait_for(pause_fn(chat_id), timeout=3.0)
-                        await asyncio.sleep(0.35)
-                        await asyncio.wait_for(resume_fn(chat_id), timeout=3.0)
-                        await asyncio.sleep(0.35)
-                        succeeded = True
-                    except Exception as inner_exc:
-                        LOG.debug(
-                            "First-play warm-up attempt %s/%s failed for %s: %s",
-                            pause_name, resume_name, chat_id, inner_exc,
-                        )
-                        break
-                if succeeded:
+                try:
+                    await asyncio.wait_for(pause_fn(chat_id), timeout=3.0)
+                    await asyncio.sleep(0.35)
+                    await asyncio.wait_for(resume_fn(chat_id), timeout=3.0)
+                    await asyncio.sleep(0.35)
                     _warmed_up_chats.add(chat_id)
                     LOG.info(
                         "First-play audio warm-up completed for %s using %s/%s",
                         chat_id, pause_name, resume_name,
                     )
                     return
+                except Exception as inner_exc:
+                    LOG.debug(
+                        "First-play warm-up attempt %s/%s failed for %s: %s",
+                        pause_name, resume_name, chat_id, inner_exc,
+                    )
 
         LOG.debug("First-play warm-up not available for %s: no pause/resume API", chat_id)
     except Exception as e:
@@ -916,20 +884,15 @@ async def _do_play(chat_id: int, stream):
     native NTgCalls extension and kill the Python process.  A per-chat
     asyncio.Lock guarantees at most one play() runs at a time for a chat,
     while other chats remain fully parallel.
-
-    A global semaphore additionally caps how many chats may run play()
-    concurrently — without this, dozens of groups starting /play at the
-    same moment overload the native extension and crash the worker.
     """
-    async with _GLOBAL_PLAY_SEM:
-        async with _get_play_lock(chat_id):
-            orphan = _orphan_play_tasks.pop(chat_id, None)
-            if orphan and not orphan.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(orphan), timeout=10.0)
-                except (asyncio.TimeoutError, Exception):
-                    pass
-            await _do_play_locked(chat_id, stream)
+    async with _get_play_lock(chat_id):
+        orphan = _orphan_play_tasks.pop(chat_id, None)
+        if orphan and not orphan.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(orphan), timeout=10.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        await _do_play_locked(chat_id, stream)
 
 
 async def _drain_orphan_play_task(chat_id: int, timeout: float = 10.0) -> None:
@@ -979,14 +942,14 @@ async def _do_play_locked(chat_id: int, stream):
     if chat_id in _active_chats:
         suppress_next_stream_end(chat_id)
 
-    # Per-method hard timeout.  Earlier we used 4 s, which was too tight on
-    # Railway's cold-started dynos: a healthy play() routinely finished in
-    # 4-7 s after a cold start, so the foreground waiter timed out and we
-    # demoted the call to an orphan task — which skipped the foreground
-    # warmup and left the first track silent.  10 s comfortably covers
-    # cold dynos while still escaping a genuinely wedged call quickly via
-    # the outer retry chain.
-    PLAY_METHOD_TIMEOUT = 10.0
+    # Per-method hard timeout.  4 s is enough for a healthy play() to
+    # respond — a slower response almost always means the call is wedged
+    # and the next method/reset will work better than waiting longer.
+    # Larger values (we tried 12s) made the wedge cascade painfully slow
+    # (3 × 12 = 36 s of dead air before recovery even started); 4s keeps
+    # the recovery snappy and the outer chain still retries with a fresh
+    # assistant join, which is what actually fixes wedged calls.
+    PLAY_METHOD_TIMEOUT = 4.0
 
     async def _reset_call_state():
         """Leave the call to clear py-tgcalls internal state.
@@ -1051,17 +1014,9 @@ async def _do_play_locked(chat_id: int, stream):
                     # cause of the "first song no sound" symptom on slower
                     # / cold-started deployments. Schedule warmup here so
                     # WebRTC re-binds the audio track even on the slow path.
-                    #
-                    # Give the orphan path a small extra delay before the
-                    # warmup so WebRTC negotiation has more time to finish
-                    # on cold dynos — without this the pause/resume cycle
-                    # often lands as a no-op and the first track still
-                    # plays silent.
                     try:
-                        async def _delayed_warmup():
-                            await asyncio.sleep(1.5)
-                            await _warmup_first_play_if_needed(chat_id)
-                        _safe_bg(_delayed_warmup(), "warmup_orphan")
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(_warmup_first_play_if_needed(chat_id))
                     except Exception:
                         pass
                 except Exception as exc:
@@ -1072,10 +1027,6 @@ async def _do_play_locked(chat_id: int, stream):
                 [play_task], timeout=PLAY_METHOD_TIMEOUT,
             )
             if play_task in pending:
-                # Fast-reap completed orphans BEFORE inserting a new one so
-                # the dict cannot balloon between progress-tick reaps in
-                # busy moments — otherwise low-RAM dynos can OOM.
-                _reap_orphan_tasks()
                 _orphan_play_tasks[chat_id] = play_task
                 LOG.warning(
                     "play() taking >%.1fs for %s — proceeding without cancelling native call",
@@ -1388,7 +1339,7 @@ async def _start_progress_timer(chat_id: int, duration: int):
     if _central_progress_task is None or _central_progress_task.done():
         _central_progress_task = asyncio.create_task(_central_progress_loop())
     try:
-        _safe_bg(_stream_health_watchdog(chat_id), "stream_health_watchdog")
+        asyncio.create_task(_stream_health_watchdog(chat_id))
     except Exception:
         pass
 
@@ -1548,7 +1499,7 @@ async def stream_audio(
             _last_successful_platform[chat_id] = "jiosaavn"
         # Kick off prefetch for the NEXT queue item — makes skip/auto-next instant
         try:
-            _safe_bg(prefetch_next(chat_id), "prefetch_next")
+            asyncio.create_task(prefetch_next(chat_id))
         except Exception:
             pass
     except Exception as exc:
@@ -1689,7 +1640,7 @@ async def stream_video(
                  chat_id, title, media_path[:100])
         # Kick off prefetch for the NEXT queue item — makes skip/auto-next instant
         try:
-            _safe_bg(prefetch_next(chat_id), "prefetch_next")
+            asyncio.create_task(prefetch_next(chat_id))
         except Exception:
             pass
     except Exception as exc:
@@ -2033,7 +1984,7 @@ async def leave_voice_chat(chat_id: int) -> None:
         # Don't block the user's command — keep trying in the background so the
         # userbot actually drops out of the VC even if pytgcalls is wedged.
         try:
-            _safe_bg(_background_ensure_left(chat_id), "background_ensure_left")
+            asyncio.create_task(_background_ensure_left(chat_id))
         except Exception:
             pass
 
@@ -2364,7 +2315,7 @@ async def _try_play_chain(chat_id: int, first_item, max_attempts: int = 5):
             # New track is playing — start prefetching the FOLLOWING item so
             # the next /skip or auto-next is also instant.
             try:
-                _safe_bg(prefetch_next(chat_id), "prefetch_next")
+                asyncio.create_task(prefetch_next(chat_id))
             except Exception:
                 pass
             return item
