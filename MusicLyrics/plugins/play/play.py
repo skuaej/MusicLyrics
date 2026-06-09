@@ -786,11 +786,11 @@ async def play_command(client: Client, message: Message):
         dur = format_duration(duration)
         color = _get_next_color()
         await status_msg.edit_text(
-            f"**🎵 Queue-তে যোগ হয়েছে #{position}**\n\n"
-            f"**Title:** {title}\n"
-            f"**Duration:** {dur}\n"
-            f"**Requested by:** {requester}\n\n"
-            f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
+            f"**📜 Queue-তে যোগ হয়েছে #{position}**\n\n"
+            f"> 💿 **Title:** {title}\n"
+            f"> ⏳ **Duration:** {dur}\n"
+            f"> 👑 **Requested by:** {requester}\n\n"
+            f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)",
             reply_markup=_queue_added_keyboard(color),
         )
         await _add_reaction(chat_id, message.id)
@@ -853,8 +853,8 @@ async def play_command(client: Client, message: Message):
         f"{t['header']} **ᴘʟᴀʏʙᴀᴄᴋ ᴀᴄᴛɪᴠᴀᴛᴇᴅ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
         f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{title}]({url})\n"
         f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
-        f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {requester}\n\n"
-        f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
+        f"> 👑  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {requester}\n\n"
+        f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
     )
 
     try:
@@ -1073,8 +1073,8 @@ async def playforce_command(client: Client, message: Message):
         f"⚡ **ꜰᴏʀᴄᴇ ᴘʟᴀʏ | ᴇɴᴊᴏʏ ᴛʜᴇ ᴍᴜꜱɪᴄ**\n\n"
         f"> {t['title_icon']}  **ᴛɪᴛʟᴇ :** [{title}]({url})\n"
         f"> {t['dur_icon']}  **ᴅᴜʀᴀᴛɪᴏɴ :** {dur}\n"
-        f"> 👤  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {requester}\n\n"
-        f"🦋 ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
+        f"> 👑  **ʀᴇǫᴜᴇꜱᴛᴇᴅ :** {requester}\n\n"
+        f"✨ ✦ᴘᴏᴡєʀєᴅ ʙʏ » ── [@R4J_81](https://t.me/R4J_81)"
     )
 
     try:
