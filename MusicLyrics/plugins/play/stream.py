@@ -737,8 +737,31 @@ def _make_audio_stream(media_path: str):
         raise RuntimeError("py-tgcalls MediaStream not available.")
 
     if _HAS_FLAGS:
-        # Mirror the SDP shape used by /vplay (audio + video direction)
-        # so the WebRTC negotiation cannot lose the audio-binding race.
+        # Force the AUDIO direction to be REQUIRED in the negotiated SDP
+        # and the VIDEO direction to be IGNORED at the stream level.  On
+        # py-tgcalls 2.x using AUTO_DETECT for video would have py-tgcalls
+        # try to *open the source as a video file first* to decide whether
+        # to add a video track; with audio-only stream URLs (m4a) this
+        # detection can race with the WebRTC negotiation and the audio
+        # binding loses the race ("first /play has no sound" symptom).
+        # Setting audio_flags=REQUIRED forces py-tgcalls to commit to the
+        # audio direction up front, so the warm-up pause/resume cycle
+        # actually has a bound audio track to toggle.
+        AudioFlags = getattr(MediaStream, "Flags", None)
+        try:
+            return MediaStream(
+                media_path,
+                audio_parameters=AudioQuality.HIGH,
+                video_flags=MediaStream.Flags.IGNORE,
+                audio_flags=MediaStream.Flags.REQUIRED,
+            )
+        except (AttributeError, TypeError) as e:
+            LOG.debug(
+                "MediaStream with REQUIRED audio + IGNORE video failed: %s", e,
+            )
+        # Older py-tgcalls builds may not accept audio_flags — fall back
+        # to mirroring the /vplay SDP shape (audio + video direction) so
+        # the WebRTC negotiation does not strip the audio direction.
         try:
             return MediaStream(
                 media_path,
@@ -864,18 +887,27 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
     if ptc is None:
         return
     try:
-        # Give the call enough time to finish negotiating before we toggle.
-        # On cold-started deployments the WebRTC negotiation can take well
-        # over a second; if we toggle before it's bound, pause/resume is a
-        # no-op and the first track still plays silent. We do progressively
-        # longer pre-sleeps so warmup wins even on slow negotiations, but
-        # we START with a very short delay so audio binds within a few
-        # hundred milliseconds on fast deployments — the previous 1.2 s
-        # start was audible as a chunk of missing audio at the top of the
-        # first track on every cold start.
-        for pre_sleep in (0.25, 0.6, 1.2, 2.0):
-            await asyncio.sleep(pre_sleep)
+        # The original implementation slept 0.25 s and then ran a single
+        # pause→resume cycle.  pause() is effectively instant even when the
+        # WebRTC track is not yet bound (NTgCalls happily flips an internal
+        # flag), so the loop returned successfully without actually re-
+        # binding the audio track on cold or slow Telegram negotiations.
+        # The result was the well-known "first /play has no sound, but
+        # /vplay works" symptom that the user is still reporting.
+        #
+        # Fix: wait long enough for the SDP negotiation to be fully done
+        # BEFORE the first toggle, then run multiple pause→resume cycles
+        # with healthy gaps between them so at least one cycle lands
+        # *after* the audio track is bound.  Only mark the chat warmed-up
+        # once a complete cycle has actually executed.
+        await asyncio.sleep(1.4)
 
+        cycles_done = 0
+        for pre_sleep in (0.0, 0.8, 1.5):
+            if pre_sleep:
+                await asyncio.sleep(pre_sleep)
+
+            cycle_ok = False
             for pause_name, resume_name in (
                 ("pause", "resume"),
                 ("pause_stream", "resume_stream"),
@@ -886,20 +918,32 @@ async def _warmup_first_play_if_needed(chat_id: int) -> None:
                     continue
                 try:
                     await asyncio.wait_for(pause_fn(chat_id), timeout=3.0)
-                    await asyncio.sleep(0.35)
+                    await asyncio.sleep(0.45)
                     await asyncio.wait_for(resume_fn(chat_id), timeout=3.0)
-                    await asyncio.sleep(0.35)
-                    _warmed_up_chats.add(chat_id)
-                    LOG.info(
-                        "First-play audio warm-up completed for %s using %s/%s",
-                        chat_id, pause_name, resume_name,
+                    await asyncio.sleep(0.45)
+                    cycle_ok = True
+                    cycles_done += 1
+                    LOG.debug(
+                        "First-play warm-up cycle %d via %s/%s for %s",
+                        cycles_done, pause_name, resume_name, chat_id,
                     )
-                    return
+                    break
                 except Exception as inner_exc:
                     LOG.debug(
                         "First-play warm-up attempt %s/%s failed for %s: %s",
                         pause_name, resume_name, chat_id, inner_exc,
                     )
+            if not cycle_ok:
+                # If no pause/resume API is even callable, no point looping.
+                break
+
+        if cycles_done:
+            _warmed_up_chats.add(chat_id)
+            LOG.info(
+                "First-play audio warm-up completed for %s (%d cycle%s)",
+                chat_id, cycles_done, "" if cycles_done == 1 else "s",
+            )
+            return
 
         LOG.debug("First-play warm-up not available for %s: no pause/resume API", chat_id)
     except Exception as e:
