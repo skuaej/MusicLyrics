@@ -439,6 +439,29 @@ async def vplay_command(client: Client, message: Message):
         await _add_reaction(chat_id, message.id)
         return
 
+    # ── EARLY GATE: refuse if no assistant available for this chat ──
+    # Without this, /vplay wastes a full search+download cycle on groups
+    # where the assistant cannot join the VC anyway.
+    from MusicLyrics.userbot import assistant_in_chat, pool_size
+    if pool_size() == 0:
+        await message.reply_text(
+            "❌ **Music feature off** — `STRING_SESSION` সেট করা নেই।"
+        )
+        await _add_reaction(chat_id, message.id)
+        return
+    if not await assistant_in_chat(chat_id):
+        await message.reply_text(
+            "❌ **এই গ্রুপে আমার assistant নেই।**\n\n"
+            "প্রথমে assistant-কে গ্রুপে add করো, তারপর `/vplay` দাও।\n"
+            "Assistant ছাড়া video play হবে না — তাই search ও skip করছি।"
+        )
+        await _add_reaction(chat_id, message.id)
+        return
+
+    # Global resolve semaphore — same one play.py uses so audio + video
+    # together stay below the cap.
+    from MusicLyrics.plugins.play.play import _resolve_semaphore
+
     status_msg = await message.reply_text(
         f"🎬 **Video খুঁজছি:** `{query[:80]}`\n\nঅপেক্ষা করুন..."
     )
@@ -450,7 +473,8 @@ async def vplay_command(client: Client, message: Message):
         # Pre-join VC concurrently while resolving media (speed optimization)
         pre_join_task = asyncio.create_task(pre_join_vc(chat_id))
         try:
-            info, media_path, is_stream = await _resolve_video(query, platform)
+            async with _resolve_semaphore:
+                info, media_path, is_stream = await _resolve_video(query, platform)
         finally:
             try:
                 await pre_join_task

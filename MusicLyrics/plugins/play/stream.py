@@ -449,6 +449,14 @@ async def pre_join_vc(chat_id: int) -> None:
 
         if winner is not None:
             LOG.info("Pre-join: Assistant joined group %s via %s", chat_id, winner)
+            # Refresh the membership cache so the next /play in this chat sees
+            # the assistant as present immediately instead of waiting for the
+            # TTL to expire.
+            try:
+                from MusicLyrics.userbot import invalidate_assistant_membership
+                invalidate_assistant_membership(chat_id)
+            except Exception:
+                pass
         else:
             LOG.warning(
                 "Pre-join: All parallel methods failed for %s (errors=%s) — "

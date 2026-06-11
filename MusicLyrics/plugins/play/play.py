@@ -137,6 +137,37 @@ from MusicLyrics.utils.autodelete import (
 LOG = logging.getLogger(__name__)
 
 
+# ── Global concurrency guard ────────────────────────────────────────────────
+# Each /play resolves media by racing multiple yt-dlp / ffmpeg / network
+# fallbacks in parallel. If many users in many groups add many songs in a
+# short burst, the bot can spawn dozens of concurrent yt-dlp subprocesses
+# and exhaust the host's RAM — the deployment platform (Heroku / Railway /
+# Render) then OOM-kills the container, which the user sees as a crash.
+#
+# A small semaphore caps how many resolutions run at once. New /play
+# requests still queue up almost instantly (they only wait inside the
+# semaphore), but the bot never tries to download more than a handful of
+# songs simultaneously.
+#
+# Tune via env var so heavier deployments can raise the cap without a
+# code change.
+_MAX_CONCURRENT_RESOLVES = max(
+    1,
+    int(os.environ.get("MAX_CONCURRENT_RESOLVES", "4") or "4"),
+)
+_resolve_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_RESOLVES)
+LOG.info(
+    "Audio resolve concurrency cap: %d (override via MAX_CONCURRENT_RESOLVES)",
+    _MAX_CONCURRENT_RESOLVES,
+)
+
+
+async def _resolve_query_guarded(query: str, platform: str, message):
+    """Run :func:`_resolve_query` under the global resolve semaphore."""
+    async with _resolve_semaphore:
+        return await _resolve_query(query, platform, message)
+
+
 def _detect_platform(text: str) -> str:
     """Return platform name from a URL or 'query' for plain text."""
     if is_youtube_url(text):
@@ -765,6 +796,26 @@ async def play_command(client: Client, message: Message):
         await _add_reaction(chat_id, message.id)
         return
 
+    # ── EARLY GATE: refuse to search if no assistant can ever play here ──
+    # Without this check the bot wastes a full search + download cycle on
+    # every /play in groups where the assistant isn't even a member.
+    from MusicLyrics.userbot import assistant_in_chat, pool_size
+    if pool_size() == 0:
+        await message.reply_text(
+            "❌ **Music feature off** — `STRING_SESSION` সেট করা নেই।\n"
+            "Owner-কে বলুন assistant configure করতে।"
+        )
+        await _add_reaction(chat_id, message.id)
+        return
+    if not await assistant_in_chat(chat_id):
+        await message.reply_text(
+            "❌ **এই গ্রুপে আমার assistant নেই।**\n\n"
+            "প্রথমে assistant-কে গ্রুপে add করো, তারপর `/play` দাও।\n"
+            "Assistant ছাড়া গান বাজানো সম্ভব না — তাই search ও skip করছি।"
+        )
+        await _add_reaction(chat_id, message.id)
+        return
+
     status_msg = await message.reply_text(
         f"🔍 **খুঁজছি:** `{query[:80]}`\n\nঅপেক্ষা করুন..."
     )
@@ -776,7 +827,7 @@ async def play_command(client: Client, message: Message):
         # Pre-join VC concurrently while resolving media (speed optimization)
         pre_join_task = asyncio.create_task(pre_join_vc(chat_id))
         try:
-            info, media_path, is_stream = await _resolve_query(query, platform, message)
+            info, media_path, is_stream = await _resolve_query_guarded(query, platform, message)
         finally:
             # Ensure pre-join task completes (or is cancelled)
             try:
@@ -1017,6 +1068,22 @@ async def playforce_command(client: Client, message: Message):
         await _add_reaction(chat_id, message.id)
         return
 
+    # ── EARLY GATE: refuse if no assistant available for this chat ──
+    from MusicLyrics.userbot import assistant_in_chat, pool_size
+    if pool_size() == 0:
+        await message.reply_text(
+            "❌ **Music feature off** — `STRING_SESSION` সেট করা নেই।"
+        )
+        await _add_reaction(chat_id, message.id)
+        return
+    if not await assistant_in_chat(chat_id):
+        await message.reply_text(
+            "❌ **এই গ্রুপে আমার assistant নেই।**\n\n"
+            "প্রথমে assistant-কে গ্রুপে add করো, তারপর `/playforce` দাও।"
+        )
+        await _add_reaction(chat_id, message.id)
+        return
+
     status_msg = await message.reply_text(
         f"⚡ **Force Play:** `{query[:80]}`\n\nবর্তমান গান বন্ধ করছি..."
     )
@@ -1053,7 +1120,7 @@ async def playforce_command(client: Client, message: Message):
         # Pre-join VC concurrently while resolving media (speed optimization)
         pre_join_task = asyncio.create_task(pre_join_vc(chat_id))
         try:
-            info, media_path, is_stream = await _resolve_query(query, platform, message)
+            info, media_path, is_stream = await _resolve_query_guarded(query, platform, message)
         finally:
             try:
                 await pre_join_task
