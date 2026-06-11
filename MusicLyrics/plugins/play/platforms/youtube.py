@@ -1865,7 +1865,7 @@ def _get_stream_url_sync(url: str, audio_only: bool) -> Optional[str]:
     if _proxy_dead:
         LOG.info("Proxy is dead — skipping proxy attempts, going direct for: %s", url)
         combos = _get_client_combos()
-        for combo in combos[:7]:  # Try first 7 combos (expanded)
+        for combo in combos:  # Try ALL combos — stops at first success
             opts = {**_base_ytdlp_opts(client_combo=combo), "format": fmt}
             opts.pop("proxy", None)  # Force no proxy
             try:
@@ -1881,8 +1881,11 @@ def _get_stream_url_sync(url: str, audio_only: bool) -> Optional[str]:
         return None
 
     last_err = None
-    # Try first 7 client combos for faster failure detection
-    for combo in _get_client_combos()[:7]:
+    # Try ALL client combos — stops at first success.  Previously capped at
+    # the first 7 which meant "tv", "android_testsuite", "mweb", "tv_embedded"
+    # and the combo pairs were never tried, causing total failure on cloud
+    # IPs once the top clients got 403'd.
+    for combo in _get_client_combos():
         opts = {**_base_ytdlp_opts(client_combo=combo), "format": fmt}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1921,16 +1924,22 @@ def _get_stream_url_sync(url: str, audio_only: bool) -> Optional[str]:
         except Exception as exc2:
             LOG.warning("No-proxy fallback also failed: %s", exc2)
 
-    # Fallback: try "b" (best anything) with default client, no restrictions
+    # Fallback: try "b" (best anything) with known last-resort clients
     if last_err:
         LOG.info("Retrying with permissive format 'b' for: %s", url)
         try:
             fb_opts = _base_ytdlp_opts()
             fb_opts["format"] = "b"
             fb_opts["check_formats"] = False
+            fb_opts["socket_timeout"] = 25
             fb_opts.pop("proxy", None)
-            # Remove player_client restriction — let yt-dlp decide
-            fb_opts.get("extractor_args", {}).get("youtube", {}).pop("player_client", None)
+            # Force last-resort clients (TV/embedded/testsuite) instead of
+            # removing player_client entirely.  Removing it makes yt-dlp
+            # default to "web" which is the most aggressively blocked
+            # client on cloud IPs (causing repeat 403s).
+            fb_opts.setdefault("extractor_args", {}).setdefault("youtube", {})[
+                "player_client"
+            ] = ["tv", "tv_embedded", "android_testsuite", "mediaconnect"]
             with yt_dlp.YoutubeDL(fb_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 result = _extract_stream_from_info(info, audio_only)
@@ -1939,6 +1948,32 @@ def _get_stream_url_sync(url: str, audio_only: bool) -> Optional[str]:
                     return result
         except Exception as exc2:
             LOG.warning("Permissive fallback also failed: %s", exc2)
+
+    # Final last-resort: walk EVERY remaining combo with a long timeout
+    # and no proxy.  This is the safety net before we give up.
+    if last_err:
+        LOG.info("Final exhaustive retry for: %s", url)
+        try:
+            for combo in _get_client_combos():
+                final_opts = _base_ytdlp_opts(client_combo=combo)
+                final_opts["format"] = "b"
+                final_opts["check_formats"] = False
+                final_opts["socket_timeout"] = 30
+                final_opts.pop("proxy", None)
+                try:
+                    with yt_dlp.YoutubeDL(final_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        result = _extract_stream_from_info(info, audio_only)
+                        if result:
+                            LOG.info(
+                                "Stream URL obtained via final exhaustive retry "
+                                "for %s (client: %s)", url, combo,
+                            )
+                            return result
+                except Exception:
+                    continue
+        except Exception as exc_final:
+            LOG.warning("Final exhaustive retry failed: %s", exc_final)
 
     if last_err:
         LOG.error("All yt-dlp stream URL attempts failed: %s — %s", url, last_err)
@@ -2684,8 +2719,11 @@ async def _run_ytdlp(url: str, opts: dict) -> Optional[str]:
         LOG.info("Proxy is dead — running yt-dlp without proxy for: %s", url)
 
     last_err = None
-    # Try first 7 client combos for download (expanded for maximum reliability)
-    for combo in _get_client_combos()[:7]:
+    # Try ALL client combos for download.  Previously capped at the first 7
+    # which meant the "tv" / "android_testsuite" / "mweb" / combo-pair
+    # fallbacks were never attempted, causing the "Permissive download
+    # fallback also failed" cascade observed in Railway logs.
+    for combo in _get_client_combos():
         run_opts = {**opts}
         # Build extractor_args preserving PO token and visitor data
         yt_args = {"player_client": combo}
@@ -2760,18 +2798,24 @@ async def _run_ytdlp(url: str, opts: dict) -> Optional[str]:
         except Exception as exc_np:
             LOG.warning("No-proxy download fallback also failed: %s", exc_np)
 
-    # Fallback: try "b" format with default client, no proxy, no restrictions
+    # Fallback: try "b" format with known last-resort clients, no proxy
     if last_err:
         LOG.info("Retrying download with permissive format 'b' for: %s", url)
         try:
             fallback_opts = {**opts, "format": "b",
-                             "check_formats": False}
+                             "check_formats": False,
+                             "socket_timeout": 25}
             fallback_opts.pop("proxy", None)
             cookie = _get_cookie()
             if cookie:
                 fallback_opts["cookiefile"] = cookie
-            # Remove player_client restriction — let yt-dlp decide
-            fallback_opts.get("extractor_args", {}).get("youtube", {}).pop("player_client", None)
+            # Force last-resort clients (TV/embedded/testsuite/mediaconnect)
+            # instead of removing player_client.  Removing it caused yt-dlp
+            # to fall back to "web" client which is the most aggressively
+            # blocked on cloud IPs — defeating the purpose of the fallback.
+            fallback_opts.setdefault("extractor_args", {}).setdefault("youtube", {})[
+                "player_client"
+            ] = ["tv", "tv_embedded", "android_testsuite", "mediaconnect"]
             with yt_dlp.YoutubeDL(fallback_opts) as ydl:
                 info = await loop.run_in_executor(
                     None, lambda: ydl.extract_info(url, download=True)
@@ -2787,6 +2831,51 @@ async def _run_ytdlp(url: str, opts: dict) -> Optional[str]:
                         return matches[0]
         except Exception as exc2:
             LOG.warning("Permissive download fallback also failed: %s", exc2)
+
+    # Final last-resort download: walk EVERY remaining combo with long
+    # timeout and no proxy.  Safety net before giving up on the track.
+    if last_err:
+        LOG.info("Final exhaustive download retry for: %s", url)
+        try:
+            for combo in _get_client_combos():
+                final_opts = {**opts, "format": "b",
+                              "check_formats": False,
+                              "socket_timeout": 30}
+                final_opts.pop("proxy", None)
+                cookie = _get_cookie()
+                if cookie:
+                    final_opts["cookiefile"] = cookie
+                yt_args = {"player_client": combo}
+                po_token = os.environ.get("YT_PO_TOKEN", "").strip()
+                if po_token:
+                    yt_args["po_token"] = [po_token]
+                visitor_data = os.environ.get("YT_VISITOR_DATA", "").strip()
+                if visitor_data:
+                    yt_args["visitor_data"] = [visitor_data]
+                final_opts["extractor_args"] = {"youtube": yt_args}
+                try:
+                    with yt_dlp.YoutubeDL(final_opts) as ydl:
+                        info = await loop.run_in_executor(
+                            None, lambda: ydl.extract_info(url, download=True)
+                        )
+                        if not info:
+                            continue
+                        path = ydl.prepare_filename(info)
+                        if os.path.exists(path):
+                            LOG.info(
+                                "Downloaded via final exhaustive retry "
+                                "(client: %s) for %s", combo, url,
+                            )
+                            return path
+                        base = os.path.splitext(path)[0]
+                        matches = sorted(glob.glob(f"{base}.*"),
+                                         key=os.path.getmtime, reverse=True)
+                        if matches:
+                            return matches[0]
+                except Exception:
+                    continue
+        except Exception as exc_final:
+            LOG.warning("Final exhaustive download retry failed: %s", exc_final)
 
     if last_err:
         LOG.error("All yt-dlp download attempts failed: %s — %s", url, last_err)
